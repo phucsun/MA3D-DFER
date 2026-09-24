@@ -62,7 +62,7 @@ class DfewDataset(Dataset):
         use_3dmm: bool = False,
         max_frames: int = None,
         frame_step: int = 1,
-        sample_strategy: str = "normal", # "normal", "uniform", hoặc "segment"
+        sample_strategy: str = "normal", # "normal", "uniform", "segment", "OF"
         stats_path: str = None,
         clip_flip_p: float = 0.0,
         random_temporal_crop: bool = False,
@@ -136,7 +136,7 @@ class DfewDataset(Dataset):
                 "frame_paths": frame_paths,
             })
 
-    def _sample_indices(self, num_frames: int):
+    def _sample_indices(self, num_frames: int, frame_path: str = None):
         """Trả về list các indices của frame sẽ được lấy dựa trên strategy"""
         
         # 1. NORMAL: Cắt 1 đoạn liên tục (Giữ nguyên logic cũ của bạn)
@@ -218,7 +218,97 @@ class DfewDataset(Dataset):
                     indices.extend(seg_indices)
 
             return indices  
-            
+        elif self.sample_strategy == "OF":
+            import json
+
+            json_path = os.path.join("Datasets", "dfew_on_apex_off.json")
+
+            with open(json_path, "r") as f:
+                of_data = json.load(f)
+
+            # Datasets/DFEW/images/00001/000001_000001.jpg
+            video_id = os.path.basename(os.path.dirname(frame_path))
+            if video_id not in of_data:
+                # fallback
+                print(f"[Warning] Video {video_id} không có thông tin OF, dùng uniform sampling.")
+                return list(np.linspace(0, num_frames - 1, self.num_frames, dtype=int))
+
+            info = of_data[video_id]
+
+            onset = info["onset"]
+            apex_list = info["apex"]
+            offset = info["offset"]
+
+            indices = []
+
+            indices.append(onset)
+            indices.append(offset)
+            n_apex = len(apex_list)
+
+            # Thêm toàn bộ apex trước
+            for apex in apex_list:
+                indices.append(apex)
+
+            # Số frame còn lại dành cho các frame lân cận
+            remain = self.max_frames - len(indices)
+
+            if remain <= 0:
+                return sorted(set(np.clip(indices, 0, self.max_frames - 1)))
+
+            base = remain // n_apex
+            extra = remain % n_apex
+
+            for i, apex in enumerate(apex_list):
+
+                # k = số frame lân cận của apex này
+                k = base + (1 if i < extra else 0)
+
+                if k <= 0:
+                    continue
+
+                left = k // 2
+                right = k - left
+
+                # khoảng cách tối đa tới onset / offset
+                left_dist = apex - onset
+                right_dist = offset - apex
+
+                # step động
+                left_step = 4 if left == 0 else max(1, min(4, left_dist // (left + 1)))
+                right_step = 4 if right == 0 else max(1, min(4, right_dist // (right + 1)))
+
+                # bên trái
+                for r in range(left, 0, -1):
+                    idx = apex - r * left_step
+                    indices.append(int(np.clip(idx, onset, offset)))
+
+                # bên phải
+                for r in range(1, right + 1):
+                    idx = apex + r * right_step
+                    indices.append(int(np.clip(idx, onset, offset)))
+
+            indices = sorted(set(indices))
+
+            # If duplicates cause too few frames, pad with neighbors
+            while len(indices) < self.max_frames:
+                added = False
+                for idx in list(indices):
+                    for d in (-1, 1):
+                        x = idx + d
+                        if 0 <= x < num_frames and x not in indices:
+                            indices.append(x)
+                            added = True
+                            if len(indices) == self.max_frames:
+                                break
+                    if len(indices) == self.max_frames:
+                        break
+                if not added:
+                    break
+
+            indices = sorted(indices)
+            # print(f"[OF Sampling] video={video_id}, self.max_frames={self.max_frames}, indices={indices}")
+            # print(f"[OF Sampling] onset={onset}, apex={apex_list}, offset={offset}, remain={remain}, base={base}, extra={extra}")
+            return indices
         else:
             raise ValueError(f"Chiến lược không hợp lệ: {self.sample_strategy}")
 
@@ -227,6 +317,20 @@ class DfewDataset(Dataset):
 
     def __len__(self):
         return len(self.samples)
+    
+    def get_sampled_frame_paths(self, idx):
+        item = self.samples[idx]
+        frame_paths = item["frame_paths"]
+
+        indices = self._sample_indices(
+            len(frame_paths),
+            frame_path=frame_paths[0]
+        )
+
+        return {
+            "vid_str": item["vid_str"],
+            "frame_paths": [frame_paths[i] for i in indices],
+        }
 
     def __getitem__(self, idx):
         item = self.samples[idx]
@@ -234,7 +338,7 @@ class DfewDataset(Dataset):
         vid_str = item["vid_str"]
 
         # --- Áp dụng Sampling Strategy ---
-        indices = self._sample_indices(len(frame_paths))
+        indices = self._sample_indices(len(frame_paths), frame_path = frame_paths[0])
         sampled_frame_paths = [frame_paths[i] for i in indices]
 
         flip = self._clip_flip()
@@ -320,6 +424,150 @@ def collate_video_fn(batch):
 
     return out
 
+import cv2
+import numpy as np
+from scipy.ndimage import gaussian_filter1d
+from scipy.signal import find_peaks
+
+
+def detect_onset_apex_offset(
+    frame_paths,
+    smooth_sigma=2,
+    prominence=0.2,
+    distance=25,
+    onset_ratio=0.1,
+):
+    """
+    Detect onset, apex and offset using Optical Flow + Peak Detection.
+
+    Parameters
+    ----------
+    frame_paths : list[str]
+
+    smooth_sigma : float
+        Gaussian smoothing sigma.
+
+    prominence : float
+        Minimum peak prominence after normalization.
+
+    distance : int
+        Minimum distance between neighbouring peaks.
+
+    apex_expand_ratio : float
+        Expand apex region until motion falls below
+        apex_expand_ratio * peak_value.
+
+    onset_ratio : float
+        Motion ratio for onset/offset detection.
+
+    Returns
+    -------
+    onset : int
+    apex : list[int]
+    offset : int
+    """
+
+    if len(frame_paths) < 2:
+        return 0, [0], 0
+
+    # Optical Flow Magnitude
+    motion = [0]
+    prev = cv2.imread(frame_paths[0], cv2.IMREAD_GRAYSCALE)
+
+    if prev is None:
+        raise ValueError(frame_paths[0])
+
+    for path in frame_paths[1:]:
+        curr = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
+        if curr is None:
+            raise ValueError(path)
+
+        flow = cv2.calcOpticalFlowFarneback(prev, curr, None, pyr_scale=0.5, levels=3,
+            winsize=15, iterations=3, poly_n=5, poly_sigma=1.2, flags=0,)
+        mag = np.sqrt(flow[..., 0]**2 + flow[..., 1]**2)
+        motion.append(mag.mean())
+        prev = curr
+    motion = np.asarray(motion)
+
+    # Smooth
+    motion = gaussian_filter1d(motion, sigma=smooth_sigma)
+
+    # Normalize
+    if motion.max() == motion.min():
+        return 0, [0], len(frame_paths)-1
+
+    motion = (motion - motion.min()) / (motion.max() - motion.min())
+
+
+    # Peak Detection
+    peaks, properties = find_peaks(
+        motion,
+        prominence=prominence,
+        distance=distance,
+    )
+
+    if len(peaks) == 0:
+        apex = [int(np.argmax(motion))]
+    else:
+        apex = peaks.tolist()
+
+    # Onset
+    onset_threshold = motion[apex].max() * onset_ratio
+
+    onset = 0
+
+    for i in range(apex[0]):
+        if motion[i] >= onset_threshold:
+            onset = i
+            break
+
+    # Offset
+    offset = len(motion)-1
+
+    for i in range(apex[-1], len(motion)):
+        if motion[i] <= onset_threshold:
+            offset = i
+            break
+
+    return onset, apex, offset
+
+
+
+import os
+import json
+from tqdm import tqdm
+
+
+def build_on_apex_off(root, save_path):
+    video_root = os.path.join(root, "DFEW")
+    result = {}
+    for video_id in tqdm(sorted(os.listdir(video_root))):
+
+        video_dir = os.path.join(video_root, video_id)
+
+        if not os.path.isdir(video_dir):
+            continue
+
+        frames = sorted([
+            os.path.join(video_dir, f)
+            for f in os.listdir(video_dir)
+            if f.endswith(".jpg")
+        ])
+
+        if len(frames) < 3:
+            continue
+
+        onset, apex, offset = detect_onset_apex_offset(frames)
+
+        result[video_id] = {
+            "onset": onset,
+            "apex": apex,
+            "offset": offset
+        }
+
+    with open(save_path, "w") as f:
+        json.dump(result, f, indent=4)
+
 
 # ------------------------------------------------------------------
 # Stats (Đã được điều chỉnh theo cấu trúc DFEW mới)
@@ -338,7 +586,7 @@ def compute_video_3dmm_stats_from_dataset(root: str, frame_step: int = 1, batch_
         use_3dmm=False,           # Đặt là False vì ta sẽ chủ động load file gốc, tránh bị normalize ngược
         max_frames=1,          
         frame_step=frame_step,    # Khớp với frame_step dùng khi train
-        sample_strategy="uniform", 
+        sample_strategy="OF", 
         stats_path=None,          # Chưa có file stat nên truyền None
         clip_flip_p=0.0,          # Tắt lật ảnh
         random_temporal_crop=False # Không crop thời gian bừa bãi để tính đủ frame
@@ -349,9 +597,10 @@ def compute_video_3dmm_stats_from_dataset(root: str, frame_step: int = 1, batch_
 
     # Bước cải tiến 1: Thu thập tất cả thông tin các frame cần load trước
     all_frame_tasks = []
-    for item in stats_dataset.samples:
-        vid_str = item["vid_str"]
-        for fpath in item["frame_paths"]:
+    for idx in range(len(stats_dataset)):
+        sample = stats_dataset.get_sampled_frame_paths(idx)
+        vid_str = sample["vid_str"]
+        for fpath in sample["frame_paths"]:
             stem = os.path.splitext(os.path.basename(fpath))[0]
             all_frame_tasks.append((vid_str, stem))
 
@@ -423,8 +672,10 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser("Compute 3DMM mean/std for VideoDataset")
     parser.add_argument("--root", type=str,  default="Datasets", help="Dataset root directory (vd: 'Datasets')")
-    parser.add_argument("--output", type=str, default="video_3dmm_stats_uniform.npz")
+    parser.add_argument("--output", type=str, default="video_3dmm_stats_OF.npz")
     parser.add_argument("--batch_size", type=int, default=32, help="Batch size để tính toán cho nhanh")
     args = parser.parse_args()
 
     compute_video_3dmm_stats_from_dataset(root=args.root, frame_step=1, batch_size=args.batch_size, output=args.output)
+
+    # build_on_apex_off(root="Datasets", save_path=os.path.join("Datasets", "dfew_on_apex_off.json"))

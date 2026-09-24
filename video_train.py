@@ -246,13 +246,12 @@ def main():
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
     os.makedirs(args.resume_dir, exist_ok=True)
-    resume_path = os.path.join(args.resume_dir, args.resume_name)
 
     # Định nghĩa tên file cố định cho 3 checkpoint metrics
     ckpt_paths = {
-        "war": os.path.join(args.resume_dir, "best_war.pth"),
-        "uar": os.path.join(args.resume_dir, "best_uar.pth"),
-        "mean": os.path.join(args.resume_dir, "best_mean.pth")
+        "war": os.path.join(args.resume_dir, f"{args.resume_name}_best_war.pth"),
+        "uar": os.path.join(args.resume_dir, f"{args.resume_name}_best_uar.pth"),
+        "mean": os.path.join(args.resume_dir, f"{args.resume_name}_best_mean.pth")
     }
 
     # Logging
@@ -336,9 +335,7 @@ def main():
     }     
 
     # Resume từ checkpoint của metric được chọn (hoặc file mặc định cũ nếu có)
-    resume_path = os.path.join(args.resume_dir, f"best_{args.select_metric}.pth")
-    if not os.path.exists(resume_path): # fallback về tên file cũ đề phòng bạn đổi code giữa chừng
-        resume_path = os.path.join(args.resume_dir, args.resume_name)
+    resume_path = os.path.join(args.resume_dir, f"{args.resume_name}_best_{args.select_metric}.pth")
 
     if args.resume and os.path.exists(resume_path):
         print(f"Resuming from {resume_path}")

@@ -1,9 +1,9 @@
 data_dir: Datasets
 val_split: test
 num_classes: 7
-stats_path: Datasets/DFEW/video_3dmm_stats_uniform.npz
+stats_path: Datasets/video_3dmm_stats_OF.npz
 data_type: dfew
-sample_strategy: uniform
+sample_strategy: OF
 
 use_3dmm: true
 
@@ -35,7 +35,7 @@ cb_sampler_pow: 0.3
 select_metric: mean
 patience: 5
 
-log_file: video_log_dfew_uniform_pos.txt
+log_file: video_log_dfew_OF_pos.txt
 resume_dir: checkpoints
-resume_name: video_best_dfew_uniform_pos.pth
+resume_name: video_best_dfew_OF_pos
 resume: false
