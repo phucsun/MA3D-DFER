@@ -5,3 +5,4 @@ from .FER_Plus import FERPlusDataset
 from .Caers import CaersDataset
 from .Cheo_FaMo import CheoFaMo
 from .VideoDataset import VideoDataset, collate_video_fn
+from .Dfew import DfewDataset

@@ -3,6 +3,7 @@ import time
 import argparse
 
 import torch
+import yaml 
 import torch.optim as optim
 from torch.utils.data import DataLoader, WeightedRandomSampler
 from torchvision import transforms
@@ -11,7 +12,7 @@ from tqdm import tqdm
 from models.MA3D_Video import MA3D_Video
 from models.sam import SAM
 from loss_function.loss import MarginAwareCELoss, LabelSmoothingCrossEntropy
-from Read_dataset import VideoDataset, collate_video_fn
+from Read_dataset import VideoDataset, collate_video_fn, DfewDataset
 from video_engine import train_one_epoch_video, validate_video
 
 
@@ -34,11 +35,15 @@ class EarlyStopping:
 def get_args():
     parser = argparse.ArgumentParser("MA3D-Video Training")
 
+
+    parser.add_argument("--config", type=str, default=None, help="Path to yaml config")
     # Dataset
-    parser.add_argument("--data_dir", type=str, required=True)
+    parser.add_argument("--data_dir", type=str, default=None, help="Dataset root directory (vd: 'Datasets')")
     parser.add_argument("--val_split", type=str, default=None)
     parser.add_argument("--num_classes", type=int, default=7)
     parser.add_argument("--stats_path", type=str, default=None)
+    parser.add_argument("--data_type", type=str, default="caers", choices=["dfew", "caers"])
+    parser.add_argument("--sample_strategy", type=str, default="normal", choices=["normal", "uniform", "segment"])
 
     # 3DMM flag
     parser.add_argument("--use_3dmm", action="store_true")
@@ -101,7 +106,18 @@ def get_args():
     parser.add_argument("--resume_name", type=str, default="video_best.pth")
     parser.add_argument("--resume", action="store_true")
 
-    return parser.parse_args()
+
+    args = parser.parse_args()
+    if args.config:
+        with open(args.config) as f:
+            cfg = yaml.safe_load(f)
+    parser.set_defaults(**cfg)
+
+    args = parser.parse_args()
+
+    print(f"Amp: {'ON' if args.amp else 'OFF'}")
+
+    return args
 
 
 def _find_val_split(data_dir: str, hint: str = None) -> str:
@@ -137,26 +153,50 @@ def build_dataloaders(args):
     val_split = _find_val_split(args.data_dir, args.val_split)
     print(f"Validation split: '{val_split}'")
 
-    train_dataset = VideoDataset(
-        root=args.data_dir,
-        split="train",
-        transform=train_transform,
-        use_3dmm=args.use_3dmm,
-        max_frames=args.max_frames,
-        frame_step=args.frame_step,
-        stats_path=args.stats_path,
-        clip_flip_p=0.5,
-        random_temporal_crop=True,
-    )
-    val_dataset = VideoDataset(
-        root=args.data_dir,
-        split=val_split,
-        transform=val_transform,
-        use_3dmm=args.use_3dmm,
-        max_frames=args.max_frames,
-        frame_step=args.frame_step,
-        stats_path=args.stats_path,
-    )
+    if args.data_type== "caers":
+        train_dataset = VideoDataset(
+            root=args.data_dir,
+            split="train",
+            transform=train_transform,
+            use_3dmm=args.use_3dmm,
+            max_frames=args.max_frames,
+            frame_step=args.frame_step,
+            stats_path=args.stats_path,
+            clip_flip_p=0.5,
+            random_temporal_crop=True,
+        )
+        val_dataset = VideoDataset(
+            root=args.data_dir,
+            split=val_split,
+            transform=val_transform,
+            use_3dmm=args.use_3dmm,
+            max_frames=args.max_frames,
+            frame_step=args.frame_step,
+            stats_path=args.stats_path,
+        )
+    else:
+        train_dataset = DfewDataset(
+            root=args.data_dir,
+            split="train",
+            transform=train_transform,
+            use_3dmm=args.use_3dmm,
+            max_frames=args.max_frames,
+            frame_step=args.frame_step,
+            sample_strategy = args.sample_strategy,
+            stats_path=args.stats_path,
+            clip_flip_p=0.5,
+            random_temporal_crop=True,
+        )
+        val_dataset = DfewDataset(
+            root=args.data_dir,
+            split=val_split,
+            transform=val_transform,
+            use_3dmm=args.use_3dmm,
+            max_frames=args.max_frames,
+            frame_step=args.frame_step,
+            sample_strategy = args.sample_strategy,
+            stats_path=args.stats_path,
+        )
 
     is_windows = os.name == "nt"
     persistent = (args.num_workers > 0) and (not is_windows)
@@ -208,6 +248,13 @@ def main():
     os.makedirs(args.resume_dir, exist_ok=True)
     resume_path = os.path.join(args.resume_dir, args.resume_name)
 
+    # Định nghĩa tên file cố định cho 3 checkpoint metrics
+    ckpt_paths = {
+        "war": os.path.join(args.resume_dir, "best_war.pth"),
+        "uar": os.path.join(args.resume_dir, "best_uar.pth"),
+        "mean": os.path.join(args.resume_dir, "best_mean.pth")
+    }
+
     # Logging
     log_f = None
     if args.log_file:
@@ -220,7 +267,7 @@ def main():
             f"select={args.select_metric}  cls_w={args.use_class_weights}(pow={args.cb_loss_pow})  "
             f"sampler={args.use_weighted_sampler}(pow={args.cb_sampler_pow})\n"
         )
-        log_f.write(f"checkpoint: {resume_path}\n")
+        log_f.write(f"checkpoints directory: {args.resume_dir}\n")
         log_f.write(
             f"{'Epoch':^6} {'LR':^12} {'Train_Loss':^12} {'Train_Acc':^10} "
             f"{'Val_Loss':^12} {'Val_WAR':^10} {'Val_UAR':^10} {'Time(min)':^10} {'ES':^6}\n"
@@ -281,7 +328,17 @@ def main():
     start_epoch = 0
     best_val_acc = 0.0   
     best_val_uar = 0.0   
-    best_score = 0.0     
+    # Khởi tạo dict để lưu kỷ lục tốt nhất của từng metric
+    best_scores = {
+        "war": 0.0,
+        "uar": 0.0,
+        "mean": 0.0,
+    }     
+
+    # Resume từ checkpoint của metric được chọn (hoặc file mặc định cũ nếu có)
+    resume_path = os.path.join(args.resume_dir, f"best_{args.select_metric}.pth")
+    if not os.path.exists(resume_path): # fallback về tên file cũ đề phòng bạn đổi code giữa chừng
+        resume_path = os.path.join(args.resume_dir, args.resume_name)
 
     if args.resume and os.path.exists(resume_path):
         print(f"Resuming from {resume_path}")
@@ -290,13 +347,20 @@ def main():
         optimizer.load_state_dict(ckpt["optimizer"])
         scheduler.load_state_dict(ckpt["scheduler"])
         start_epoch = ckpt["epoch"] + 1
-        best_val_acc = ckpt.get("best_val_acc", 0.0)
-        best_val_uar = ckpt.get("best_val_uar", 0.0)
-        best_score = ckpt.get("best_score", best_val_acc)
+        
+        # Load lại lịch sử best scores nếu có trong checkpoint mới, ngược lại dùng logic cũ
+        if "best_scores" in ckpt:
+            best_scores = ckpt["best_scores"]
+        else:
+            best_scores["war"] = ckpt.get("best_val_acc", 0.0)
+            best_scores["uar"] = ckpt.get("best_val_uar", 0.0)
+            best_scores["mean"] = ckpt.get("best_score", best_scores["war"])
+            
         if early_stopper and "es_counter" in ckpt:
             early_stopper.counter = ckpt["es_counter"]
-            early_stopper.best = best_score
-        print(f"  epoch={start_epoch}  best_score({args.select_metric})={best_score:.4f}")
+            early_stopper.best = ckpt.get("best_score", best_scores[args.select_metric])
+        print(f"  epoch={start_epoch} | Best WAR: {best_scores['war']*100:.2f}% | "
+              f"Best UAR: {best_scores['uar']*100:.2f}% | Best Mean: {best_scores['mean']*100:.2f}%")
 
     epoch_bar = tqdm(
         range(start_epoch, args.epochs),
@@ -333,35 +397,36 @@ def main():
             num_classes=args.num_classes,
         )
 
-        val_score = {
-            "war":  val_acc,
-            "uar":  val_uar,
+        # Gom các giá trị hiện tại vào dict để so sánh vòng lặp
+        current_scores = {
+            "war": val_acc,
+            "uar": val_uar,
             "mean": 0.5 * (val_acc + val_uar),
-        }[args.select_metric]
-        is_best = val_score > best_score
+        }
 
         scheduler.step()
         lr = optimizer.param_groups[0]["lr"]
         elapsed = (time.time() - t0) / 60.0
         es_count = early_stopper.counter if early_stopper else 0
 
+        # Cập nhật hiển thị Progress bar với tất cả kỷ lục
         epoch_bar.set_postfix({
             "lr":    f"{lr:.1e}",
             "t_acc": f"{train_acc * 100:.1f}%",
-            "WAR":   f"{val_acc * 100:.1f}%",
-            "UAR":   f"{val_uar * 100:.1f}%",
-            "best":  f"{best_score * 100:.1f}%",
+            "WAR*":  f"{best_scores['war'] * 100:.1f}%",
+            "UAR*":  f"{best_scores['uar'] * 100:.1f}%",
+            "MEAN*": f"{best_scores['mean'] * 100:.1f}%",
             "ES":    f"{es_count}/{args.patience}" if args.patience > 0 else "off",
         })
 
         summary = (
-            f"Ep {epoch + 1:3d}/{args.epochs} | "
-            f"lr={lr:.2e} | "
+            f"Ep {epoch + 1:3d}/{args.epochs} | lr={lr:.2e} | "
             f"train {train_loss:.4f}/{train_acc * 100:.2f}% | "
-            f"val {val_loss:.4f} WAR {val_acc * 100:.2f}% UAR {val_uar * 100:.2f}% | "
-            f"{elapsed:.1f}min"
+            f"val {val_loss:.4f} WAR {val_acc * 100:.2f}% UAR {val_uar * 100:.2f}% | {elapsed:.1f}min"
         )
-        if is_best:
+        
+        # Đánh dấu nếu trúng metric chính đang tối ưu
+        if current_scores[args.select_metric] > best_scores[args.select_metric]:
             summary += f"  ★ best ({args.select_metric})"
         tqdm.write(summary)
 
@@ -373,31 +438,36 @@ def main():
             )
             log_f.flush()
 
-        if is_best:
-            best_score = val_score
-            best_val_acc = val_acc
-            best_val_uar = val_uar
-            torch.save({
-                "epoch": epoch,
-                "model": model.state_dict(),
-                "optimizer": optimizer.state_dict(),
-                "scheduler": scheduler.state_dict(),
-                "best_val_acc": best_val_acc,
-                "best_val_uar": best_val_uar,
-                "best_score": best_score,
-                "select_metric": args.select_metric,
-                "es_counter": es_count,
-                "args": vars(args),
-            }, resume_path)
-            if log_f is not None:
-                log_f.write(f"BEST\t{args.select_metric}={best_score * 100:.2f}\t"
-                            f"WAR={best_val_acc * 100:.2f}\tUAR={best_val_uar * 100:.2f}\n")
-                log_f.flush()
+        # Vòng lặp kiểm tra và lưu độc lập từng checkpoint metric
+        for metric, score in current_scores.items():
+            if score > best_scores[metric]:
+                best_scores[metric] = score  # Cập nhật kỷ lục mới
+                
+                # Lưu checkpoint riêng cho metric này
+                torch.save({
+                    "epoch": epoch,
+                    "model": model.state_dict(),
+                    "optimizer": optimizer.state_dict(),
+                    "scheduler": scheduler.state_dict(),
+                    "best_scores": best_scores,
+                    "metric_type": metric,
+                    "best_score": score,  # trường cũ để tương thích với cấu trúc cũ nếu cần
+                    "es_counter": es_count,
+                    "args": vars(args),
+                }, ckpt_paths[metric])
+                
+                tqdm.write(f" => Saved best {metric.upper()} checkpoint: {score * 100:.2f}%")
+                
+                if log_f is not None and metric == args.select_metric:
+                    log_f.write(f"BEST\t{args.select_metric}={score * 100:.2f}\t"
+                                f"WAR={val_acc * 100:.2f}\tUAR={val_uar * 100:.2f}\n")
+                    log_f.flush()
 
-        if early_stopper and early_stopper.step(val_score):
+        # Early stopping dựa theo metric cấu hình trong tham số đầu vào (args.select_metric)
+        if early_stopper and early_stopper.step(current_scores[args.select_metric]):
             tqdm.write(
                 f"\nEarly stopping after epoch {epoch + 1} "
-                f"(no improvement for {args.patience} epochs)."
+                f"(no improvement for {args.patience} epochs dựa trên {args.select_metric.upper()})."
             )
             if log_f is not None:
                 log_f.write(f"EARLY_STOP\tepoch={epoch + 1}\n")
@@ -405,13 +475,17 @@ def main():
 
     epoch_bar.close()
 
-    print(f"\nBest checkpoint ({args.select_metric}): "
-          f"WAR={best_val_acc * 100:.2f}%  UAR={best_val_uar * 100:.2f}%")
+    print(f"\nFinal Best Records:")
+    print(f"  Best WAR : {best_scores['war'] * 100:.2f}%")
+    print(f"  Best UAR : {best_scores['uar'] * 100:.2f}%")
+    print(f"  Best Mean: {best_scores['mean'] * 100:.2f}%")
+    
     if log_f is not None:
-        log_f.write(f"\nBest checkpoint ({args.select_metric}): "
-                    f"WAR={best_val_acc * 100:.2f}%  UAR={best_val_uar * 100:.2f}%\n")
+        log_f.write(f"\nFinal Best Records:\n"
+                    f"WAR={best_scores['war'] * 100:.2f}%\n"
+                    f"UAR={best_scores['uar'] * 100:.2f}%\n"
+                    f"Mean={best_scores['mean'] * 100:.2f}%\n")
         log_f.close()
-
 
 if __name__ == "__main__":
     main()

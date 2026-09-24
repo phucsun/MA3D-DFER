@@ -8,7 +8,7 @@ def get_loss(logits, labels, CE_criterion, lsce_criterion, MA_criterion, epoch):
     MA_loss = MA_criterion(logits, labels)
 
     loss = 2 * lsce_loss + CE_loss
-    if epoch < 10:
+    if epoch > 10:
         loss = MA_loss
 
     return loss

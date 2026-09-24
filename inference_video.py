@@ -27,6 +27,7 @@ Example:
 import os
 import argparse
 
+import yaml
 import numpy as np
 import torch
 from torch.utils.data import DataLoader
@@ -42,11 +43,13 @@ from sklearn.metrics import (
 )
 
 from models.MA3D_Video import MA3D_Video
-from Read_dataset import VideoDataset, collate_video_fn
+from Read_dataset import VideoDataset, collate_video_fn, DfewDataset
 
 
 def get_args():
     p = argparse.ArgumentParser("MA3D-Video Inference / Evaluation")
+
+    p.add_argument("--config", type=str, default=None, help="Path to yaml config")
     p.add_argument("--checkpoint", type=str, default="checkpoints/video_best.pth",
                    help="Checkpoint path (.pth)")
     p.add_argument("--data_dir", type=str, default="dataset/CAER/caer_3dmm",
@@ -56,6 +59,9 @@ def get_args():
     p.add_argument("--stats_path", type=str,
                    default="dataset/CAER/caer_3dmm/video_3dmm_stats.npz",
                    help="3DMM mean/std .npz file (only needed when use_3dmm=True)")
+    p.add_argument("--data_type", type=str, default="caers", choices=["dfew", "caers"])
+    p.add_argument("--sample_strategy", type=str, default="normal", choices=["normal", "uniform", "segment"])
+
 
     # The arguments below default to None -> read from checkpoint['args'].
     p.add_argument("--num_classes", type=int, default=None)
@@ -79,7 +85,18 @@ def get_args():
                         "Set to '' to disable.")
     p.add_argument("--save_csv", type=str, default=None,
                    help="(optional) also save the confusion matrix to a CSV file")
-    return p.parse_args()
+    
+
+    args = p.parse_args()
+    if args.config:
+        with open(args.config) as f:
+            cfg = yaml.safe_load(f)
+    p.set_defaults(**cfg)
+
+    args = p.parse_args()
+
+
+    return args
 
 
 def resolve_cfg(args, ckpt_args):
@@ -271,18 +288,29 @@ def main():
         print(f"WARNING: use_3dmm=True but stats_path does not exist ({stats_path}). "
               f"3DMM will NOT be normalized.")
 
-    val_dataset = VideoDataset(
-        root=args.data_dir,
-        split=args.val_split,
-        transform=val_transform,
-        use_3dmm=cfg["use_3dmm"],
-        max_frames=cfg["max_frames"],
-        frame_step=cfg["frame_step"],
-        stats_path=stats_path,
-    )
+    if args.data_type== "caers":
+        val_dataset = VideoDataset(
+            root=args.data_dir,
+            split=args.val_split,
+            transform=val_transform,
+            use_3dmm=args.use_3dmm,
+            max_frames=args.max_frames,
+            frame_step=args.frame_step,
+            stats_path=args.stats_path,
+        )
+    else:
+        val_dataset = DfewDataset(
+            root=args.data_dir,
+            split=args.val_split,
+            transform=val_transform,
+            use_3dmm=args.use_3dmm,
+            max_frames=args.max_frames,
+            frame_step=args.frame_step,
+            stats_path=args.stats_path,
+            sample_strategy=args.sample_strategy
+        )
     class_names = val_dataset.class_names
-    print(f"\nValidation: {len(val_dataset)} samples | "
-          f"mode={val_dataset.mode} | classes={class_names}")
+    print(f"\nValidation: {len(val_dataset)} samples | classes={class_names}")
 
     is_windows = os.name == "nt"
     val_loader = DataLoader(

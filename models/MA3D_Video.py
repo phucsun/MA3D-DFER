@@ -33,49 +33,133 @@ class TemporalLSTM(nn.Module):
         return self.fc(out)  # (B, hidden_dim)
 
 
-class TemporalTransformer(nn.Module):
-    """Transformer encoder with masked mean pooling."""
-
-    def __init__(self, embed_dim=512, num_heads=8, num_layers=2, dropout=0.1):
+class DropPath(nn.Module):
+    """Stochastic Depth — tắt ngẫu nhiên residual block trong lúc training."""
+    def __init__(self, drop_prob: float = 0.0):
         super().__init__()
-        encoder_layer = nn.TransformerEncoderLayer(
-            d_model=embed_dim,
-            nhead=num_heads,
-            dim_feedforward=embed_dim * 2,
-            dropout=dropout,
-            batch_first=True,
-        )
-        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+        self.drop_prob = drop_prob
 
-    def forward(self, features, seq_lengths=None):
-        # features: (B, T, embed_dim)
-        padding_mask = None
-        if seq_lengths is not None:
-            B, T = features.shape[:2]
-            # True = ignore this position
-            padding_mask = (
-                torch.arange(T, device=features.device).unsqueeze(0) >= seq_lengths.unsqueeze(1)
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if not self.training or self.drop_prob == 0.0:
+            return x
+        keep_prob = 1.0 - self.drop_prob
+        shape = (x.shape[0],) + (1,) * (x.ndim - 1)
+        noise = torch.empty(shape, dtype=x.dtype, device=x.device).bernoulli_(keep_prob).div_(keep_prob)
+        return x * noise
+
+
+class _TFLayerWithDropPath(nn.Module):
+    """Wrapper: TransformerEncoderLayer + DropPath trên combined residual."""
+    def __init__(self, base_layer: nn.TransformerEncoderLayer, drop_path_rate: float):
+        super().__init__()
+        self.base = base_layer
+        self.dp = DropPath(drop_path_rate)
+
+    def forward(self, x: torch.Tensor, src_key_padding_mask=None) -> torch.Tensor:
+        delta = self.base(x, src_key_padding_mask=src_key_padding_mask) - x
+        return x + self.dp(delta)
+
+
+class TemporalTransformer(nn.Module):
+    """
+    Cải tiến:
+      1. input_norm — ổn định feature từ frozen backbone.
+      2. DropPath — stochastic depth regularization.
+      3. CLS + masked mean pool fusion — biểu diễn phong phú hơn.
+    """
+
+    def __init__(
+        self,
+        embed_dim: int = 512,
+        num_heads: int = 8,
+        num_layers: int = 4,
+        dropout: float = 0.1,
+        max_len: int = 256,
+        dim_feedforward: int = None,       
+        drop_path_rate: float = 0.1,       
+        use_cls_mean_fusion: bool = True,   
+    ):
+        super().__init__()
+
+        if dim_feedforward is None:
+            dim_feedforward = embed_dim * 4
+
+        # [NEW] Normalize feature từ backbone (quan trọng khi backbone frozen)
+        self.input_norm = nn.LayerNorm(embed_dim)
+
+        # DropPath rate tăng tuyến tính theo chiều sâu
+        dpr = [x.item() for x in torch.linspace(0, drop_path_rate, num_layers)]
+        self.layers = nn.ModuleList()
+        for i in range(num_layers):
+            base = nn.TransformerEncoderLayer(
+                d_model=embed_dim,
+                nhead=num_heads,
+                dim_feedforward=dim_feedforward, 
+                dropout=dropout,
+                activation='gelu',
+                norm_first=True,
+                batch_first=True,
+            )
+            self.layers.append(_TFLayerWithDropPath(base, dpr[i]))
+
+        self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
+        self.pos_embedding = nn.Parameter(torch.zeros(1, max_len + 1, embed_dim))
+        self.pos_drop = nn.Dropout(p=dropout)
+        self.norm = nn.LayerNorm(embed_dim)
+
+        # [NEW] Fusion CLS + mean pool
+        self.use_cls_mean_fusion = use_cls_mean_fusion
+        if use_cls_mean_fusion:
+            self.fusion = nn.Sequential(
+                nn.Linear(embed_dim * 2, embed_dim),
+                nn.GELU(),
+                nn.LayerNorm(embed_dim),
             )
 
-        out = self.transformer(features, src_key_padding_mask=padding_mask)
+        nn.init.trunc_normal_(self.cls_token, std=0.02)
+        nn.init.trunc_normal_(self.pos_embedding, std=0.02)
 
+    def forward(self, features: torch.Tensor, seq_lengths=None) -> torch.Tensor:
+        B, T, _ = features.shape
+
+        # [NEW] Input normalization
+        features = self.input_norm(features)
+
+        cls_tokens = self.cls_token.expand(B, -1, -1)
+        features = torch.cat((cls_tokens, features), dim=1)  # (B, T+1, D)
+        features = features + self.pos_embedding[:, :T + 1]
+        features = self.pos_drop(features)
+
+        padding_mask = None
         if seq_lengths is not None:
-            valid_mask = ~padding_mask  # (B, T)
-            out = (out * valid_mask.unsqueeze(-1).float()).sum(dim=1)
-            out = out / valid_mask.sum(dim=1, keepdim=True).float().clamp(min=1)
-        else:
-            out = out.mean(dim=1)
+            frame_mask = (
+                torch.arange(T, device=features.device).unsqueeze(0) >= seq_lengths.unsqueeze(1)
+            )
+            cls_mask = torch.zeros((B, 1), dtype=torch.bool, device=features.device)
+            padding_mask = torch.cat((cls_mask, frame_mask), dim=1)
 
-        return out  # (B, embed_dim)
+        for layer in self.layers:
+            features = layer(features, src_key_padding_mask=padding_mask)
+
+        out = self.norm(features)
+        out_cls = out[:, 0]  # (B, D)
+
+        # [NEW] Fuse với masked mean pool
+        if self.use_cls_mean_fusion:
+            frame_out = out[:, 1:]  # (B, T, D)
+            if seq_lengths is not None:
+                mask = torch.arange(T, device=frame_out.device).unsqueeze(0) < seq_lengths.unsqueeze(1)
+                mean_out = (frame_out * mask.unsqueeze(-1).float()).sum(1) \
+                           / mask.sum(1, keepdim=True).float().clamp(min=1)
+            else:
+                mean_out = frame_out.mean(1)
+            out_cls = self.fusion(torch.cat([out_cls, mean_out], dim=-1))
+
+        return out_cls  # (B, 512)
 
 
 class TemporalAttnPool(nn.Module):
-    """BiLSTM + learned attention pooling thay cho last-state readout.
-
-    Khác với TemporalLSTM (chỉ lấy hidden state cuối), module này chấm điểm
-    từng timestep của lstm_out bằng một query học được rồi lấy weighted sum,
-    có mask theo seq_lengths.
-    """
+    """BiLSTM + learned attention pooling thay cho last-state readout."""
 
     def __init__(self, input_dim=512, hidden_dim=512, num_layers=2, dropout=0.2):
         super().__init__()
@@ -87,7 +171,6 @@ class TemporalAttnPool(nn.Module):
             batch_first=True,
             bidirectional=True,
         )
-        # Chấm điểm attention: (B, T, hidden_dim*2) -> (B, T, 1)
         self.attn = nn.Sequential(
             nn.Linear(hidden_dim * 2, hidden_dim),
             nn.Tanh(),
@@ -105,7 +188,7 @@ class TemporalAttnPool(nn.Module):
             B, T = features.shape[:2]
             pad_mask = (
                 torch.arange(T, device=features.device).unsqueeze(0) >= seq_lengths.unsqueeze(1)
-            )  # True = padding
+            )
             scores = scores.masked_fill(pad_mask, float("-inf"))
 
         weights = torch.softmax(scores, dim=1).unsqueeze(-1)  # (B, T, 1)
@@ -137,25 +220,7 @@ _TEMPORAL_MODULES = {
 
 
 class MA3D_Video(nn.Module):
-    """
-    Wrapper MA3D backbone for video.
-
-    Pipeline:
-        (B, T, 3, 224, 224)  →  per-frame MA3D features (B, T, 512)
-                              →  temporal aggregation         (B, 512)
-                              →  classification head          (B, num_classes)
-
-    Args:
-        img_size: default 224
-        num_classes: default 7
-        type: "small"|"base"|"large"
-        use_3dmm: có dùng nhánh ThreeDMM hay không
-        temporal_module: "lstm" | "transformer" | "attn-pool" | "mean"
-        hidden_dim: only for lstm
-        freeze_backbone: đóng băng toàn bộ MA3D 
-        head_dropout: dropout before classification head
-        backbone_chunk_size: max number of frames forward to backbone
-    """
+    """Wrapper MA3D backbone for video."""
 
     def __init__(
         self,
@@ -191,7 +256,13 @@ class MA3D_Video(nn.Module):
             self.temporal = TemporalAttnPool(input_dim=512, hidden_dim=hidden_dim)
             out_dim = hidden_dim
         elif temporal_module == "transformer":
-            self.temporal = TemporalTransformer(embed_dim=512)
+            self.temporal = TemporalTransformer(
+                embed_dim=512,
+                num_layers=4,
+                dim_feedforward=512 * 4,   
+                drop_path_rate=0.1,       
+                use_cls_mean_fusion=True,  
+            )
             out_dim = 512
         elif temporal_module == "mean":
             self.temporal = TemporalMeanPool()
@@ -211,25 +282,15 @@ class MA3D_Video(nn.Module):
             param.requires_grad = True
 
     def forward(self, video, video_3d=None, seq_lengths=None):
-        """
-        Args:
-            video:      (B, T, 3, H, W)
-            video_3d:   (B, T, 334) per-frame or (B, 334) or None
-            seq_lengths: (B,) actual number of frames before padding
-
-        Returns:
-            logits:   (B, num_classes)
-            features: (B, hidden_dim)
-        """
         B, T = video.shape[:2]
 
         frames_flat = video.view(B * T, *video.shape[2:])  # (B*T, 3, H, W)
 
         x_3d_flat = None
         if self.use_3dmm and video_3d is not None:
-            if video_3d.dim() == 3:        # (B, T, 334) — per-frame
+            if video_3d.dim() == 3:
                 x_3d_flat = video_3d.reshape(B * T, video_3d.shape[-1])
-            else:                          # (B, 334) — fixed for whole video
+            else:
                 x_3d_flat = video_3d.unsqueeze(1).expand(-1, T, -1).reshape(B * T, -1)
 
         backbone_trainable = any(p.requires_grad for p in self.backbone.parameters())
@@ -249,8 +310,7 @@ class MA3D_Video(nn.Module):
             feat_chunks.append(feat)
         feat_flat = torch.cat(feat_chunks, dim=0)  # (B*T, 512)
 
-        # (B, T, 512)
-        frame_features = feat_flat.view(B, T, -1)
+        frame_features = feat_flat.view(B, T, -1)  # (B, T, 512)
 
         temporal_feat = self.temporal(frame_features, seq_lengths)
         logits = self.head(self.dropout(temporal_feat))

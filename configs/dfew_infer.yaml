@@ -1,0 +1,21 @@
+checkpoint: checkpoints/video_best_dfew_segment.pth
+data_dir: Datasets
+val_split: test
+stats_path: Datasets/DFEW/video_3dmm_stats.npz
+data_type: dfew
+sample_strategy: segment
+
+num_classes: 7
+model_type: large
+temporal_module: transformer
+hidden_dim: 512
+head_dropout: 0.3
+max_frames: 16
+frame_step: 1
+use_3dmm: true
+
+batch_size: 1
+num_workers: 4
+amp: false
+
+save_pdf: inference_report_dfew_segment.pdf

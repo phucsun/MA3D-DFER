@@ -60,6 +60,13 @@ def train_one_epoch_video(
             logits, _ = model(video, video_3d, seq_lengths=lengths)
             loss = get_loss(logits, labels, CE_criterion, lsce_criterion, MA_criterion, epoch)
 
+
+        # if torch.isnan(loss):
+        #     print("Loss is NaN!")
+        #     print("labels:", labels)
+        #     print("logits:", logits)
+        #     break
+
         optimizer.zero_grad()
         loss.backward()
         optimizer.first_step(zero_grad=True)
@@ -67,7 +74,9 @@ def train_one_epoch_video(
         with torch.amp.autocast("cuda", enabled=use_amp and is_cuda):
             logits_2, _ = model(video, video_3d, seq_lengths=lengths)
             loss_2 = get_loss(logits_2, labels, CE_criterion, lsce_criterion, MA_criterion, epoch)
+        
 
+      
         loss_2.backward()
         optimizer.second_step(zero_grad=True)
 

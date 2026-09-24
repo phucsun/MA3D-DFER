@@ -85,7 +85,7 @@ class MA3D(nn.Module):
 
         self.face_landback = MobileFaceNet([112, 112],136)
         face_landback_checkpoint = torch.load(
-            "checkpoints/mobilefacenet_model_best.pth_o1.tar",
+            "checkpoints/mobilefacenet_model_best.pth_o1.tar", weights_only=False, 
             map_location=lambda storage, loc: storage)
         self.face_landback.load_state_dict(face_landback_checkpoint['state_dict'])
 
@@ -97,7 +97,7 @@ class MA3D(nn.Module):
 
 
         self.ir_back = Backbone(50, 0.0, 'ir')
-        ir_checkpoint = torch.load("checkpoints/ir50_o1.pth",
+        ir_checkpoint = torch.load("checkpoints/ir50_o1.pth", weights_only=False,
                                    map_location=lambda storage, loc: storage)
         # ir_checkpoint = ir_checkpoint["model"]
         self.ir_back = load_pretrained_weights(self.ir_back, ir_checkpoint)

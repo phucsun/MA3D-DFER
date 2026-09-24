@@ -1,0 +1,41 @@
+data_dir: Datasets
+val_split: test
+num_classes: 7
+stats_path: Datasets/DFEW/video_3dmm_stats_uniform.npz
+data_type: dfew
+sample_strategy: uniform
+
+use_3dmm: true
+
+model_type: large
+temporal_module: transformer
+hidden_dim: 512
+freeze_backbone: true
+unfreeze_backbone_epoch: 5
+backbone_lr_scale: 0.1
+head_dropout: 0.3
+backbone_checkpoint: checkpoints/raf_MA.pth
+
+max_frames: 16
+frame_step: 1
+
+epochs: 20
+batch_size: 1
+lr: 0.0001
+weight_decay: 0.0005
+num_workers: 4
+
+amp: false
+
+use_class_weights: true
+cb_loss_pow: 0.5
+use_weighted_sampler: true
+cb_sampler_pow: 0.3
+
+select_metric: mean
+patience: 5
+
+log_file: video_log_dfew_uniform_pos.txt
+resume_dir: checkpoints
+resume_name: video_best_dfew_uniform_pos.pth
+resume: false
