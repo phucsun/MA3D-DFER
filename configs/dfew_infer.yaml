@@ -1,9 +1,9 @@
-checkpoint: checkpoints/best_uar.pth
+checkpoint: checkpoints/video_best_dfew_uniform_pos_freq_best_uar.pth
 data_dir: Datasets
 val_split: test
-stats_path: Datasets/video_3dmm_stats_OF.npz
+stats_path: Datasets/DFEW/video_3dmm_stats_uniform.npz
 data_type: dfew
-sample_strategy: OF
+sample_strategy: uniweform
 
 num_classes: 7
 model_type: large
@@ -18,4 +18,4 @@ batch_size: 1
 num_workers: 4
 amp: false
 
-save_pdf: video_best_dfew_OF_no_pos.pdf
+save_pdf: video_best_dfew_uniform_pos_freq.pdf

@@ -3,35 +3,37 @@ import torch.nn as nn
 import torch.utils.checkpoint
 from .MA3D import MA3D
 
-
-class TemporalLSTM(nn.Module):
-    """Bidirectional LSTM with linear projection to hidden_dim."""
-
-    def __init__(self, input_dim=512, hidden_dim=512, num_layers=2, dropout=0.2):
+class FrequencyTokenizer(nn.Module):
+    def __init__(self,
+                 embed_dim=512,
+                 num_freq_tokens=4):
         super().__init__()
-        self.lstm = nn.LSTM(
-            input_size=input_dim,
-            hidden_size=hidden_dim,
-            num_layers=num_layers,
-            dropout=dropout if num_layers > 1 else 0.0,
-            batch_first=True,
-            bidirectional=True,
+
+        self.num_freq_tokens = num_freq_tokens
+
+        self.proj = nn.Sequential(
+            nn.Linear(embed_dim, embed_dim),
+            nn.GELU(),
+            nn.LayerNorm(embed_dim)
         )
-        self.fc = nn.Linear(hidden_dim * 2, hidden_dim)
 
-    def forward(self, features, seq_lengths=None):
-        # features: (B, T, input_dim)
-        lstm_out, _ = self.lstm(features)  # (B, T, hidden_dim*2)
+    def forward(self, x):
+        """
+        x : (B,T,C)
+        """
 
-        if seq_lengths is not None:
-            B = features.shape[0]
-            idx = (seq_lengths - 1).clamp(min=0).long()
-            out = lstm_out[torch.arange(B, device=features.device), idx]
-        else:
-            out = lstm_out[:, -1]  # (B, hidden_dim*2)
+        # FFT theo chiều thời gian
+        freq = torch.fft.rfft(x, dim=1)
 
-        return self.fc(out)  # (B, hidden_dim)
+        # magnitude
+        freq = freq.abs()
 
+        # chỉ giữ low-frequency
+        freq = freq[:, :self.num_freq_tokens]
+
+        freq = self.proj(freq)
+
+        return freq
 
 class DropPath(nn.Module):
     """Stochastic Depth — tắt ngẫu nhiên residual block trong lúc training."""
@@ -60,268 +62,122 @@ class _TFLayerWithDropPath(nn.Module):
         return x + self.dp(delta)
 
 
-# class TemporalTransformer(nn.Module):
-#     """
-#     Cải tiến:
-#       1. input_norm — ổn định feature từ frozen backbone.
-#       2. DropPath — stochastic depth regularization.
-#       3. CLS + masked mean pool fusion — biểu diễn phong phú hơn.
-#     """
-
-#     def __init__(
-#         self,
-#         embed_dim: int = 512,
-#         num_heads: int = 8,
-#         num_layers: int = 4,
-#         dropout: float = 0.1,
-#         max_len: int = 256,
-#         dim_feedforward: int = None,       
-#         drop_path_rate: float = 0.1,       
-#         use_cls_mean_fusion: bool = True,   
-#     ):
-#         super().__init__()
-
-#         if dim_feedforward is None:
-#             dim_feedforward = embed_dim * 4
-
-#         # [NEW] Normalize feature từ backbone (quan trọng khi backbone frozen)
-#         self.input_norm = nn.LayerNorm(embed_dim)
-
-#         # DropPath rate tăng tuyến tính theo chiều sâu
-#         dpr = [x.item() for x in torch.linspace(0, drop_path_rate, num_layers)]
-#         self.layers = nn.ModuleList()
-#         for i in range(num_layers):
-#             base = nn.TransformerEncoderLayer(
-#                 d_model=embed_dim,
-#                 nhead=num_heads,
-#                 dim_feedforward=dim_feedforward, 
-#                 dropout=dropout,
-#                 activation='gelu',
-#                 norm_first=True,
-#                 batch_first=True,
-#             )
-#             self.layers.append(_TFLayerWithDropPath(base, dpr[i]))
-
-#         self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
-#         self.pos_embedding = nn.Parameter(torch.zeros(1, max_len + 1, embed_dim))
-#         self.pos_drop = nn.Dropout(p=dropout)
-#         self.norm = nn.LayerNorm(embed_dim)
-
-#         # [NEW] Fusion CLS + mean pool
-#         self.use_cls_mean_fusion = use_cls_mean_fusion
-#         if use_cls_mean_fusion:
-#             self.fusion = nn.Sequential(
-#                 nn.Linear(embed_dim * 2, embed_dim),
-#                 nn.GELU(),
-#                 nn.LayerNorm(embed_dim),
-#             )
-
-#         nn.init.trunc_normal_(self.cls_token, std=0.02)
-#         nn.init.trunc_normal_(self.pos_embedding, std=0.02)
-
-#     def forward(self, features: torch.Tensor, seq_lengths=None) -> torch.Tensor:
-#         B, T, _ = features.shape
-
-#         # [NEW] Input normalization
-#         features = self.input_norm(features)
-
-#         cls_tokens = self.cls_token.expand(B, -1, -1)
-#         features = torch.cat((cls_tokens, features), dim=1)  # (B, T+1, D)
-#         features = features + self.pos_embedding[:, :T + 1]
-#         features = self.pos_drop(features)
-
-#         padding_mask = None
-#         if seq_lengths is not None:
-#             frame_mask = (
-#                 torch.arange(T, device=features.device).unsqueeze(0) >= seq_lengths.unsqueeze(1)
-#             )
-#             cls_mask = torch.zeros((B, 1), dtype=torch.bool, device=features.device)
-#             padding_mask = torch.cat((cls_mask, frame_mask), dim=1)
-
-#         for layer in self.layers:
-#             features = layer(features, src_key_padding_mask=padding_mask)
-
-#         out = self.norm(features)
-#         out_cls = out[:, 0]  # (B, D)
-
-#         # [NEW] Fuse với masked mean pool
-#         if self.use_cls_mean_fusion:
-#             frame_out = out[:, 1:]  # (B, T, D)
-#             if seq_lengths is not None:
-#                 mask = torch.arange(T, device=frame_out.device).unsqueeze(0) < seq_lengths.unsqueeze(1)
-#                 mean_out = (frame_out * mask.unsqueeze(-1).float()).sum(1) \
-#                            / mask.sum(1, keepdim=True).float().clamp(min=1)
-#             else:
-#                 mean_out = frame_out.mean(1)
-#             out_cls = self.fusion(torch.cat([out_cls, mean_out], dim=-1))
-
-#         return out_cls  # (B, 512)
-
-# class TemporalTransformer(nn.Module):
-#     """
-#     Temporal Transformer (without positional embedding)
-
-#     Improvements:
-#       1. Input LayerNorm.
-#       2. DropPath.
-#       3. CLS + masked mean pooling fusion.
-#     """
-
-#     def __init__(
-#         self,
-#         embed_dim: int = 512,
-#         num_heads: int = 8,
-#         num_layers: int = 4,
-#         dropout: float = 0.1,
-#         dim_feedforward: int = None,
-#         drop_path_rate: float = 0.1,
-#         use_cls_mean_fusion: bool = True,
-#     ):
-#         super().__init__()
-
-#         if dim_feedforward is None:
-#             dim_feedforward = embed_dim * 4
-
-#         # Normalize backbone features
-#         self.input_norm = nn.LayerNorm(embed_dim)
-
-#         # Transformer layers with DropPath
-#         dpr = torch.linspace(0, drop_path_rate, num_layers).tolist()
-#         self.layers = nn.ModuleList()
-
-#         for i in range(num_layers):
-#             base = nn.TransformerEncoderLayer(
-#                 d_model=embed_dim,
-#                 nhead=num_heads,
-#                 dim_feedforward=dim_feedforward,
-#                 dropout=dropout,
-#                 activation="gelu",
-#                 norm_first=True,
-#                 batch_first=True,
-#             )
-#             self.layers.append(_TFLayerWithDropPath(base, dpr[i]))
-
-#         # CLS token
-#         self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
-#         self.pos_drop = nn.Dropout(dropout)
-#         self.norm = nn.LayerNorm(embed_dim)
-
-#         # CLS + Mean fusion
-#         self.use_cls_mean_fusion = use_cls_mean_fusion
-#         if use_cls_mean_fusion:
-#             self.fusion = nn.Sequential(
-#                 nn.Linear(embed_dim * 2, embed_dim),
-#                 nn.GELU(),
-#                 nn.LayerNorm(embed_dim),
-#             )
-
-#         nn.init.trunc_normal_(self.cls_token, std=0.02)
-
-#     def forward(self, features: torch.Tensor, seq_lengths=None) -> torch.Tensor:
-#         B, T, _ = features.shape
-
-#         # Input normalization
-#         features = self.input_norm(features)
-
-#         # Add CLS token
-#         cls_tokens = self.cls_token.expand(B, -1, -1)
-#         features = torch.cat((cls_tokens, features), dim=1)
-
-#         # Optional dropout (without positional embedding)
-#         features = self.pos_drop(features)
-
-#         padding_mask = None
-#         if seq_lengths is not None:
-#             frame_mask = (
-#                 torch.arange(T, device=features.device).unsqueeze(0)
-#                 >= seq_lengths.unsqueeze(1)
-#             )
-#             cls_mask = torch.zeros((B, 1), dtype=torch.bool, device=features.device)
-#             padding_mask = torch.cat((cls_mask, frame_mask), dim=1)
-
-#         for layer in self.layers:
-#             features = layer(features, src_key_padding_mask=padding_mask)
-
-#         out = self.norm(features)
-#         out_cls = out[:, 0]
-
-#         if self.use_cls_mean_fusion:
-#             frame_out = out[:, 1:]
-
-#             if seq_lengths is not None:
-#                 mask = (
-#                     torch.arange(T, device=frame_out.device).unsqueeze(0)
-#                     < seq_lengths.unsqueeze(1)
-#                 )
-#                 mean_out = (
-#                     frame_out * mask.unsqueeze(-1).float()
-#                 ).sum(1) / mask.sum(1, keepdim=True).float().clamp(min=1)
-#             else:
-#                 mean_out = frame_out.mean(1)
-
-#             out_cls = self.fusion(torch.cat([out_cls, mean_out], dim=-1))
-
-#         return out_cls
-    
-
-class TemporalAttnPool(nn.Module):
-    """BiLSTM + learned attention pooling thay cho last-state readout."""
-
-    def __init__(self, input_dim=512, hidden_dim=512, num_layers=2, dropout=0.2):
+class TemporalTransformer(nn.Module):
+    def __init__(
+        self,
+        embed_dim: int = 512,
+        num_heads: int = 8,
+        num_layers: int = 4,
+        dropout: float = 0.1,
+        max_len: int = 256,
+        dim_feedforward: int = None,       
+        drop_path_rate: float = 0.1,       
+        use_cls_mean_fusion: bool = True,   
+        num_freq_tokens=4,
+    ):
         super().__init__()
-        self.lstm = nn.LSTM(
-            input_size=input_dim,
-            hidden_size=hidden_dim,
-            num_layers=num_layers,
-            dropout=dropout if num_layers > 1 else 0.0,
-            batch_first=True,
-            bidirectional=True,
+
+        if dim_feedforward is None:
+            dim_feedforward = embed_dim * 4
+
+        self.input_norm = nn.LayerNorm(embed_dim)
+
+        dpr = [x.item() for x in torch.linspace(0, drop_path_rate, num_layers)]
+        self.layers = nn.ModuleList()
+        for i in range(num_layers):
+            base = nn.TransformerEncoderLayer(
+                d_model=embed_dim,
+                nhead=num_heads,
+                dim_feedforward=dim_feedforward, 
+                dropout=dropout,
+                activation='gelu',
+                norm_first=True,
+                batch_first=True,
+            )
+            self.layers.append(_TFLayerWithDropPath(base, dpr[i]))
+
+        self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
+        self.num_freq_tokens = num_freq_tokens
+        self.pos_embedding = nn.Parameter(
+            torch.zeros(
+                1,
+                max_len + 1 + self.num_freq_tokens,
+                embed_dim
+            )
         )
-        self.attn = nn.Sequential(
-            nn.Linear(hidden_dim * 2, hidden_dim),
-            nn.Tanh(),
-            nn.Linear(hidden_dim, 1),
+        self.pos_drop = nn.Dropout(p=dropout)
+        self.norm = nn.LayerNorm(embed_dim)
+
+        self.freq_branch = FrequencyTokenizer(
+            embed_dim=embed_dim,
+            num_freq_tokens=self.num_freq_tokens
         )
-        self.fc = nn.Linear(hidden_dim * 2, hidden_dim)
 
-    def forward(self, features, seq_lengths=None):
-        # features: (B, T, input_dim)
-        lstm_out, _ = self.lstm(features)  # (B, T, hidden_dim*2)
+        self.use_cls_mean_fusion = use_cls_mean_fusion
+        if use_cls_mean_fusion:
+            self.fusion = nn.Sequential(
+                nn.Linear(embed_dim * 2, embed_dim),
+                nn.GELU(),
+                nn.LayerNorm(embed_dim),
+            )
 
-        scores = self.attn(lstm_out).squeeze(-1)  # (B, T)
+        nn.init.trunc_normal_(self.cls_token, std=0.02)
+        nn.init.trunc_normal_(self.pos_embedding, std=0.02)
 
+    def forward(self, features: torch.Tensor, seq_lengths=None) -> torch.Tensor:
+        B, T, _ = features.shape
+
+        features = self.input_norm(features)
+        freq_tokens = self.freq_branch(features)
+
+        cls_tokens = self.cls_token.expand(B, -1, -1)
+
+        # Chuỗi kết hợp: [CLS (1), Video_Frames (T), Freq_Tokens (num_freq)]
+        features = torch.cat([cls_tokens, features, freq_tokens], dim=1)
+        
+        features = features + self.pos_embedding[:, :T + 1 + self.num_freq_tokens]
+        features = self.pos_drop(features)
+
+        padding_mask = None
         if seq_lengths is not None:
-            B, T = features.shape[:2]
-            pad_mask = (
+            frame_mask = (
                 torch.arange(T, device=features.device).unsqueeze(0) >= seq_lengths.unsqueeze(1)
             )
-            scores = scores.masked_fill(pad_mask, float("-inf"))
+            cls_mask = torch.zeros((B, 1), dtype=torch.bool, device=features.device)
+            freq_mask = torch.zeros((B, self.num_freq_tokens), dtype=torch.bool, device=features.device)
 
-        weights = torch.softmax(scores, dim=1).unsqueeze(-1)  # (B, T, 1)
-        out = (lstm_out * weights).sum(dim=1)  # (B, hidden_dim*2)
+            padding_mask = torch.cat([cls_mask, frame_mask, freq_mask], dim=1)
 
-        return self.fc(out)  # (B, hidden_dim)
+        for layer in self.layers:
+            features = layer(features, src_key_padding_mask=padding_mask)
 
+        out = self.norm(features)
+        out_cls = out[:, 0]  # Lấy token CLS tại index 0
 
-class TemporalMeanPool(nn.Module):
-    """Masked mean pooling — baseline"""
+        # [SỬA LỖI LOGIC TẠI ĐÂY]
+        if self.use_cls_mean_fusion:
+            # Chỉ cắt lấy các token tương ứng với video frames (từ index 1 đến T+1)
+            frame_out = out[:, 1 : T + 1]  # Kích thước chuẩn: (B, T, D)
+            
+            if seq_lengths is not None:
+                # Tạo mask hợp lệ cho các frame thực tế
+                mask = torch.arange(T, device=frame_out.device).unsqueeze(0) < seq_lengths.unsqueeze(1)
+                # Masked mean pooling
+                mean_out = (frame_out * mask.unsqueeze(-1).float()).sum(1) \
+                           / mask.sum(1, keepdim=True).float().clamp(min=1)
+            else:
+                mean_out = frame_out.mean(1)
+                
+            # Đưa qua tầng fusion tuyến tính ban đầu mong muốn (B, D*2 -> B, D)
+            out_cls = self.fusion(torch.cat([out_cls, mean_out], dim=-1))
 
-    def forward(self, features, seq_lengths=None):
-        if seq_lengths is not None:
-            B, T = features.shape[:2]
-            mask = torch.arange(T, device=features.device).unsqueeze(0) < seq_lengths.unsqueeze(1)
-            out = (features * mask.unsqueeze(-1).float()).sum(dim=1)
-            out = out / mask.sum(dim=1, keepdim=True).float().clamp(min=1)
-        else:
-            out = features.mean(dim=1)
-        return out  # (B, embed_dim)
-
-
+        return out_cls
+    
 _TEMPORAL_MODULES = {
-    "lstm": TemporalLSTM,
+    # "lstm": TemporalLSTM,
     "transformer": TemporalTransformer,
-    "attn-pool": TemporalAttnPool,
-    "mean": TemporalMeanPool,
+    # "attn-pool": TemporalAttnPool,
+    # "mean": TemporalMeanPool,
 }
 
 
