@@ -1,18 +1,18 @@
 """
-VideoDataset — Dataset cho video facial expression recognition.
+VideoDataset — dataset for video facial expression recognition.
 
-Tự động nhận diện 2 chế độ dựa trên cấu trúc thư mục:
+Two modes are auto-detected from the directory layout:
 
-  Chế độ A — video-file (ví dụ CAER):
+  Mode A — video-file (e.g. CAER):
     root/split/ClassName/0001.avi
     root/split/ClassName/0002.avi
 
-  Chế độ B — frame-folder (frame đã extract sẵn):
+  Mode B — frame-folder (pre-extracted frames):
     root/split/ClassName/video_001/frame_001.jpg
     root/split/ClassName/video_001/frame_002.jpg
     root/split/ClassName/video_001/frame_001_shape.npy  # 3DMM optional
 
-Khi use_3dmm=False, các file .npy không cần thiết.
+When use_3dmm=False, the .npy files are not required.
 """
 
 import os
@@ -20,7 +20,6 @@ import numpy as np
 from PIL import Image
 
 import torch
-import torch.nn.functional as F
 from torch.utils.data import Dataset
 from torchvision.transforms import functional as TF
 
@@ -30,18 +29,8 @@ try:
 except ImportError:
     _HAS_CV2 = False
 
-try:
-    import torchvision.io as _tvio
-    # Kiểm tra thực sự có PyAV chưa (read_video cần PyAV)
-    _tvio._check_av_available if hasattr(_tvio, "_check_av_available") else None
-    _HAS_TVIO = True
-except Exception:
-    _HAS_TVIO = False
-
 _VIDEO_EXTENSIONS = (".avi", ".mp4", ".mov", ".mkv", ".webm")
 _IMG_EXTENSIONS   = (".jpg", ".jpeg", ".png", ".bmp", ".webp")
-
-# Thứ tự và kích thước các thành phần 3DMM (tổng 334)
 _3DMM_KEYS = ["shape", "tex", "exp", "pose", "detail"]
 _3DMM_DIMS = {"shape": 100, "tex": 50, "exp": 50, "pose": 6, "detail": 128}
 _3DMM_TOTAL = sum(_3DMM_DIMS.values())  # 334
@@ -71,12 +60,11 @@ def _load_npy_parts_from_dir(npy_dir: str):
 
 def _load_3dmm_for_frame(stem: str, folder: str):
     """
-    Tải 3DMM cho một frame. Hỗ trợ 2 cấu trúc:
-      A) Flat: folder/{stem}_{key}.npy  (cấu trúc cũ)
-      B) Nested: folder/frame_dir/{subdir}/{key}.npy  (cấu trúc CAER 3DMM)
-         — khi frame_path là folder/frame_dir/image.png, gọi với folder=frame_dir
+    Load 3DMM params for a single frame. Two layouts are supported:
+      A) Flat:   folder/{stem}_{key}.npy
+      B) Nested: folder/frame_dir/{subdir}/{key}.npy
     """
-    # Thử cấu trúc A — flat trong cùng video_dir
+    # Layout A — flat files in the same video_dir
     flat_ok = all(os.path.exists(os.path.join(folder, f"{stem}_{key}.npy")) for key in _3DMM_KEYS)
     if flat_ok:
         parts = []
@@ -87,7 +75,7 @@ def _load_3dmm_for_frame(stem: str, folder: str):
             parts.append(arr)
         return torch.from_numpy(np.concatenate(parts))
 
-    # Thử cấu trúc B — tìm subfolder trong frame_dir chứa {key}.npy
+    # Layout B — look for a subfolder under frame_dir that holds {key}.npy
     try:
         for subdir in sorted(os.listdir(folder)):
             subdir_path = os.path.join(folder, subdir)
@@ -102,22 +90,12 @@ def _load_3dmm_for_frame(stem: str, folder: str):
 
 
 def _read_video_frames(video_path: str, frame_step: int, max_frames: int, start_frame: int = 0):
-    """
-    Đọc frames từ file video. Ưu tiên cv2, fallback sang torchvision.io (cần PyAV).
-    Trả về list of PIL.Image.
-    """
-    if _HAS_CV2:
-        return _read_video_cv2(video_path, frame_step, max_frames, start_frame)
-    if _HAS_TVIO:
-        return _read_video_tvio(video_path, frame_step, max_frames, start_frame)
-    raise ImportError(
-        "Cần opencv-python hoặc torchvision + PyAV để đọc file video. "
-        "Cài đặt: pip install opencv-python"
-    )
+    if not _HAS_CV2:
+        raise ImportError(
+            "opencv-python is required to read video files. "
+            "Install it with: pip install opencv-python"
+        )
 
-
-def _read_video_cv2(video_path: str, frame_step: int, max_frames: int, start_frame: int = 0):
-    """Đọc video bằng cv2.VideoCapture."""
     cap = _cv2.VideoCapture(video_path)
     if not cap.isOpened():
         return []
@@ -134,7 +112,6 @@ def _read_video_cv2(video_path: str, frame_step: int, max_frames: int, start_fra
             break
 
         if frame_idx % frame_step == 0:
-            # cv2 đọc BGR → chuyển sang RGB
             frame_rgb = _cv2.cvtColor(frame, _cv2.COLOR_BGR2RGB)
             pil_frames.append(Image.fromarray(frame_rgb))
 
@@ -147,36 +124,23 @@ def _read_video_cv2(video_path: str, frame_step: int, max_frames: int, start_fra
     return pil_frames
 
 
-def _read_video_tvio(video_path: str, frame_step: int, max_frames: int, start_frame: int = 0):
-    """Đọc video bằng torchvision.io (cần PyAV)."""
-    frames_tensor, _, _ = _tvio.read_video(video_path, pts_unit="sec")
-    if frames_tensor.shape[0] == 0:
-        return []
-
-    frames_tensor = frames_tensor[start_frame::frame_step]
-    if max_frames is not None:
-        frames_tensor = frames_tensor[:max_frames]
-
-    return [Image.fromarray(frames_tensor[i].numpy()) for i in range(frames_tensor.shape[0])]
-
-
 class VideoDataset(Dataset):
     """
-    Dataset trả về video dưới dạng sequence frames.
+    Dataset that returns a video as a sequence of frames.
 
     Args:
-        root:          Đường dẫn gốc dataset
-        split:         Tên subfolder split, vd 'train', 'test', 'validation'
-        transform:     torchvision transform áp dụng lên từng frame (PIL → Tensor)
-        use_3dmm:      Có tải 3DMM params không (chỉ hỗ trợ ở frame-folder mode)
-        max_frames:    Giới hạn số frame tối đa (None = không giới hạn)
-        frame_step:    Lấy 1 frame mỗi N frames (temporal downsampling)
-        class_names:   Danh sách tên lớp theo thứ tự cụ thể (None = tự suy ra từ folder)
-        stats_path:    File .npz chứa mean/std để normalize 3DMM
-        clip_flip_p:   Xác suất horizontal flip — áp dụng nhất quán cho TOÀN BỘ clip
-                       (0.0 = tắt; chỉ bật cho train)
-        random_temporal_crop: Khi video dài hơn max_frames, chọn điểm bắt đầu ngẫu nhiên
-                       thay vì luôn lấy từ đầu (chỉ bật cho train)
+        root:          Dataset root path
+        split:         Split subfolder name, e.g. 'train', 'test', 'validation'
+        transform:     torchvision transform applied per frame (PIL -> Tensor)
+        use_3dmm:      Whether to load 3DMM params (frame-folder mode only)
+        max_frames:    Max number of frames (None = unlimited)
+        frame_step:    Keep 1 frame every N frames (temporal downsampling)
+        class_names:   Explicit class order (None = inferred from folders)
+        stats_path:    .npz file with mean/std used to normalize 3DMM
+        clip_flip_p:   Horizontal flip probability, applied consistently to the
+                       WHOLE clip (0.0 = off; enable for train only)
+        random_temporal_crop: When a video is longer than max_frames, pick a
+                       random start instead of always starting at 0 (train only)
     """
 
     def __init__(
@@ -205,7 +169,7 @@ class VideoDataset(Dataset):
         if not os.path.isdir(split_dir):
             raise FileNotFoundError(f"Split directory not found: {split_dir}")
 
-        # Tự suy ra class names
+        # Infer class names from folders
         if class_names is None:
             class_names = sorted([
                 d for d in os.listdir(split_dir)
@@ -222,9 +186,9 @@ class VideoDataset(Dataset):
             self._3dmm_mean = torch.from_numpy(stats["mean"].astype(np.float32))
             self._3dmm_std  = torch.from_numpy(stats["std"].astype(np.float32))
 
-        # Xây danh sách samples — tự phát hiện chế độ
-        self.samples = []  # list of dict
-        self.mode = None   # 'video_file' hoặc 'frame_folder'
+        # Build sample list with auto-detected mode
+        self.samples = []
+        self.mode = None   # 'video_file' or 'frame_folder'
         self._scan(split_dir)
 
     # ------------------------------------------------------------------
@@ -244,26 +208,26 @@ class VideoDataset(Dataset):
                 entry_path = os.path.join(cls_dir, entry)
 
                 if os.path.isfile(entry_path) and _is_video(entry):
-                    # ---- chế độ video-file ----
+                    # video-file mode
                     if detected_mode is None:
                         detected_mode = "video_file"
                     self.samples.append({
-                        "mode":       "video_file",
-                        "path":       entry_path,
-                        "label":      label,
+                        "mode":  "video_file",
+                        "path":  entry_path,
+                        "label": label,
                     })
 
                 elif os.path.isdir(entry_path):
-                    # ---- chế độ frame-folder ----
+                    # frame-folder mode
                     frames = self._list_frames(entry_path)
                     if not frames:
                         continue
                     if detected_mode is None:
                         detected_mode = "frame_folder"
                     self.samples.append({
-                        "mode":       "frame_folder",
-                        "path":       entry_path,
-                        "label":      label,
+                        "mode":        "frame_folder",
+                        "path":        entry_path,
+                        "label":       label,
                         "frame_paths": frames,
                     })
 
@@ -271,21 +235,21 @@ class VideoDataset(Dataset):
 
     def _list_frames(self, video_dir: str):
         """
-        Trả về danh sách đường dẫn frame đã được sắp xếp (với frame_step).
+        Return the sorted frame paths (with frame_step applied).
 
-        Hỗ trợ 2 cấu trúc:
-          A) Flat: video_dir/frame_001.jpg, frame_002.jpg, ...
+        Two layouts are supported:
+          A) Flat:   video_dir/frame_001.jpg, frame_002.jpg, ...
           B) Nested: video_dir/0001/cropped_image.png, 0002/cropped_image.png, ...
-             (mỗi frame nằm trong subfolder riêng, ảnh có thể đặt tên bất kỳ)
+             (each frame lives in its own subfolder; image name is arbitrary)
         """
-        # Thử cấu trúc A — ảnh nằm trực tiếp trong video_dir
-        # Lưu ý: max_frames được áp dụng lúc __getitem__ (hỗ trợ random temporal crop)
+        # Layout A — images directly inside video_dir.
+        # max_frames is applied in __getitem__ to support random temporal crop.
         direct_imgs = sorted(f for f in os.listdir(video_dir) if _is_image(f))
         if direct_imgs:
             direct_imgs = direct_imgs[:: self.frame_step]
             return [os.path.join(video_dir, f) for f in direct_imgs]
 
-        # Thử cấu trúc B — mỗi frame là một subfolder chứa một ảnh
+        # Layout B — each frame is a subfolder containing one image
         subdirs = sorted(
             d for d in os.listdir(video_dir)
             if os.path.isdir(os.path.join(video_dir, d))
@@ -301,7 +265,7 @@ class VideoDataset(Dataset):
         return nested_paths
 
     def _temporal_crop(self, n_frames: int):
-        """Trả về (start, end) index theo max_frames; random start khi train."""
+        """Return (start, end) indices bounded by max_frames; random start on train."""
         if self.max_frames is None or n_frames <= self.max_frames:
             return 0, n_frames
         if self.random_temporal_crop:
@@ -311,7 +275,6 @@ class VideoDataset(Dataset):
         return start, start + self.max_frames
 
     def _clip_flip(self):
-        """Quyết định flip một lần cho cả clip (nhất quán giữa các frame)."""
         return self.clip_flip_p > 0 and torch.rand(1).item() < self.clip_flip_p
 
     # ------------------------------------------------------------------
@@ -334,8 +297,7 @@ class VideoDataset(Dataset):
     # ------------------------------------------------------------------
 
     def _load_video_file(self, item):
-        # Random temporal crop: chọn frame bắt đầu ngẫu nhiên (cv2 seek được,
-        # tvio đọc cả video rồi slice)
+        # Random temporal crop: pick a random start frame (cv2 can seek)
         start_frame = 0
         if self.random_temporal_crop and self.max_frames is not None and _HAS_CV2:
             cap = _cv2.VideoCapture(item["path"])
@@ -350,7 +312,7 @@ class VideoDataset(Dataset):
         )
 
         if not pil_frames:
-            # Video rỗng — trả về 1 frame đen để không crash collate
+            # Empty video — return one black frame so collate doesn't crash
             dummy = Image.new("RGB", (224, 224))
             pil_frames = [dummy]
 
@@ -366,12 +328,12 @@ class VideoDataset(Dataset):
         frames = torch.stack(frames, dim=0)  # (T, 3, H, W)
 
         result = {
-            "frames":  frames,
-            "label":   torch.tensor(item["label"], dtype=torch.long),
-            "length":  torch.tensor(len(pil_frames), dtype=torch.long),
+            "frames": frames,
+            "label":  torch.tensor(item["label"], dtype=torch.long),
+            "length": torch.tensor(len(pil_frames), dtype=torch.long),
         }
 
-        # 3DMM không hỗ trợ ở chế độ video-file (chưa có file .npy)
+        # 3DMM is not available in video-file mode (no .npy files)
         if self.use_3dmm:
             result["frames_3d"] = torch.zeros(len(pil_frames), _3DMM_TOTAL)
 
@@ -385,7 +347,7 @@ class VideoDataset(Dataset):
         frame_paths = frame_paths[start:end]
 
         flip = self._clip_flip()
-        frames   = []
+        frames    = []
         frames_3d = [] if self.use_3dmm else None
 
         for fpath in frame_paths:
@@ -398,8 +360,8 @@ class VideoDataset(Dataset):
 
             if self.use_3dmm:
                 stem = os.path.splitext(os.path.basename(fpath))[0]
-                # Prefer frame's own directory (nested structure B);
-                # fall back to video_dir (flat structure A)
+                # Prefer the frame's own directory (nested layout B);
+                # fall back to video_dir (flat layout A)
                 frame_dir = os.path.dirname(fpath)
                 x_3d = _load_3dmm_for_frame(stem, frame_dir)
                 if x_3d is None and frame_dir != video_dir:
@@ -413,9 +375,9 @@ class VideoDataset(Dataset):
         frames = torch.stack(frames, dim=0)  # (T, 3, H, W)
 
         result = {
-            "frames":  frames,
-            "label":   torch.tensor(item["label"], dtype=torch.long),
-            "length":  torch.tensor(len(frame_paths), dtype=torch.long),
+            "frames": frames,
+            "label":  torch.tensor(item["label"], dtype=torch.long),
+            "length": torch.tensor(len(frame_paths), dtype=torch.long),
         }
 
         if self.use_3dmm:
@@ -430,13 +392,13 @@ class VideoDataset(Dataset):
 
 def collate_video_fn(batch):
     """
-    Custom collate_fn cho VideoDataset — zero-pad variable-length sequences.
+    Custom collate_fn for VideoDataset — zero-pad variable-length sequences.
 
     Returns dict:
         video:    (B, T_max, 3, H, W)
         labels:   (B,)
         lengths:  (B,)
-        video_3d: (B, T_max, 334) nếu có, absent nếu không
+        video_3d: (B, T_max, 334) if present, absent otherwise
     """
     max_len = max(item["length"].item() for item in batch)
 
@@ -471,3 +433,111 @@ def collate_video_fn(batch):
         out["video_3d"] = torch.stack(videos_3d)   # (B, T_max, 334)
 
     return out
+
+
+# ------------------------------------------------------------------
+# Stats
+# ------------------------------------------------------------------
+
+def compute_video_3dmm_stats(root: str, split: str = "train",
+                             output: str = "video_3dmm_stats.npz"):
+    """
+    Compute mean/std of the 3DMM params (334,) over all frames of a split and
+    save them to a .npz file with keys 'mean' and 'std' — the exact format
+    VideoDataset reads via stats_path.
+
+    Uses the same _load_3dmm_for_frame as training, so both layouts are
+    supported (flat {stem}_{key}.npy and nested subdir/{key}.npy). Frames
+    missing 3DMM are skipped (not counted as zero-vectors) and reported.
+    """
+    split_dir = os.path.join(root, split)
+    if not os.path.isdir(split_dir):
+        raise RuntimeError(f"Missing directory: {split_dir}")
+
+    from tqdm import tqdm
+
+    # Running sum / sum-of-squares to avoid holding all frames in RAM
+    total = np.zeros(_3DMM_TOTAL, dtype=np.float64)
+    total_sq = np.zeros(_3DMM_TOTAL, dtype=np.float64)
+    n_frames, n_missing, n_videos = 0, 0, 0
+
+    classes = sorted(d for d in os.listdir(split_dir)
+                     if os.path.isdir(os.path.join(split_dir, d)))
+
+    # Collect video dirs up front so tqdm has an accurate total/ETA
+    video_dirs = []
+    for cls in classes:
+        cls_dir = os.path.join(split_dir, cls)
+        for entry in sorted(os.listdir(cls_dir)):
+            video_dir = os.path.join(cls_dir, entry)
+            if os.path.isdir(video_dir):
+                video_dirs.append(video_dir)
+
+    pbar = tqdm(video_dirs, desc=f"3DMM stats [{split}]", unit="video",
+                dynamic_ncols=True)
+
+    for video_dir in pbar:
+        # List frames like _list_frames (flat layout A / nested layout B)
+        frame_paths = [os.path.join(video_dir, f)
+                       for f in sorted(os.listdir(video_dir)) if _is_image(f)]
+        if not frame_paths:
+            for sub in sorted(os.listdir(video_dir)):
+                sub_path = os.path.join(video_dir, sub)
+                if not os.path.isdir(sub_path):
+                    continue
+                imgs = sorted(f for f in os.listdir(sub_path) if _is_image(f))
+                if imgs:
+                    frame_paths.append(os.path.join(sub_path, imgs[0]))
+        if not frame_paths:
+            continue
+        n_videos += 1
+
+        for fpath in frame_paths:
+            stem = os.path.splitext(os.path.basename(fpath))[0]
+            frame_dir = os.path.dirname(fpath)
+            x_3d = _load_3dmm_for_frame(stem, frame_dir)
+            if x_3d is None and frame_dir != video_dir:
+                x_3d = _load_3dmm_for_frame(stem, video_dir)
+            if x_3d is None:
+                n_missing += 1
+                continue
+
+            arr = x_3d.numpy().astype(np.float64)
+            total += arr
+            total_sq += arr * arr
+            n_frames += 1
+
+        pbar.set_postfix({"frames": n_frames, "missing": n_missing})
+
+    pbar.close()
+
+    if n_frames == 0:
+        raise RuntimeError(f"No 3DMM params found in {split_dir}")
+
+    mean = total / n_frames
+    var = total_sq / n_frames - mean * mean
+    std = np.sqrt(np.maximum(var, 0.0))
+    std[std < 1e-6] = 1.0
+
+    out_path = os.path.join(root, output)
+    np.savez(out_path,
+             mean=mean.astype(np.float32),
+             std=std.astype(np.float32))
+
+    print(f"Videos: {n_videos}  Frames: {n_frames}  Missing 3DMM: {n_missing}")
+    print(f"mean: {mean.shape}  std: {std.shape}")
+    print(f"Saved: {out_path}")
+    return out_path
+
+
+if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser("Compute 3DMM mean/std for VideoDataset")
+    parser.add_argument("--root", type=str, required=True,
+                        help="Dataset root directory (contains the train/ subfolder)")
+    parser.add_argument("--split", type=str, default="train")
+    parser.add_argument("--output", type=str, default="video_3dmm_stats.npz")
+    args = parser.parse_args()
+
+    compute_video_3dmm_stats(args.root, args.split, args.output)

@@ -49,17 +49,24 @@ class MarginAwareCELoss(nn.Module):
 class LabelSmoothingCrossEntropy(nn.Module):
     """
     NLL loss with label smoothing.
+
+    Hỗ trợ class weighting (tuỳ chọn): nếu truyền `weight` (tensor shape (C,)),
+    mỗi sample được nhân với trọng số của lớp ground-truth rồi lấy weighted mean —
+    dùng để cân bằng các lớp thiểu số (Fear/Disgust) trong CAER.
     """
 
-    def __init__(self, smoothing=0.1):
+    def __init__(self, smoothing=0.1, weight=None):
         """
         Constructor for the LabelSmoothing module.
         :param smoothing: label smoothing factor
+        :param weight: (C,) tensor trọng số mỗi lớp, hoặc None
         """
         super(LabelSmoothingCrossEntropy, self).__init__()
         assert smoothing < 1.0
         self.smoothing = smoothing
         self.confidence = 1. - smoothing
+        # register_buffer để weight tự động đi theo .to(device)
+        self.register_buffer("weight", weight)
 
     def forward(self, x, target):
         logprobs = F.log_softmax(x, dim=-1)
@@ -67,5 +74,9 @@ class LabelSmoothingCrossEntropy(nn.Module):
         nll_loss = nll_loss.squeeze(1)
         smooth_loss = -logprobs.mean(dim=-1)
         loss = self.confidence * nll_loss + self.smoothing * smooth_loss
+
+        if self.weight is not None:
+            w = self.weight[target]                       # (N,)
+            return (loss * w).sum() / w.sum().clamp(min=1e-8)
         return loss.mean()
 

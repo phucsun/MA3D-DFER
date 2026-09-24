@@ -5,7 +5,7 @@ from .MA3D import MA3D
 
 
 class TemporalLSTM(nn.Module):
-    """Bidirectional LSTM với linear projection về hidden_dim."""
+    """Bidirectional LSTM with linear projection to hidden_dim."""
 
     def __init__(self, input_dim=512, hidden_dim=512, num_layers=2, dropout=0.2):
         super().__init__()
@@ -34,7 +34,7 @@ class TemporalLSTM(nn.Module):
 
 
 class TemporalTransformer(nn.Module):
-    """Transformer encoder với masked mean pooling."""
+    """Transformer encoder with masked mean pooling."""
 
     def __init__(self, embed_dim=512, num_heads=8, num_layers=2, dropout=0.1):
         super().__init__()
@@ -69,8 +69,53 @@ class TemporalTransformer(nn.Module):
         return out  # (B, embed_dim)
 
 
+class TemporalAttnPool(nn.Module):
+    """BiLSTM + learned attention pooling thay cho last-state readout.
+
+    Khác với TemporalLSTM (chỉ lấy hidden state cuối), module này chấm điểm
+    từng timestep của lstm_out bằng một query học được rồi lấy weighted sum,
+    có mask theo seq_lengths.
+    """
+
+    def __init__(self, input_dim=512, hidden_dim=512, num_layers=2, dropout=0.2):
+        super().__init__()
+        self.lstm = nn.LSTM(
+            input_size=input_dim,
+            hidden_size=hidden_dim,
+            num_layers=num_layers,
+            dropout=dropout if num_layers > 1 else 0.0,
+            batch_first=True,
+            bidirectional=True,
+        )
+        # Chấm điểm attention: (B, T, hidden_dim*2) -> (B, T, 1)
+        self.attn = nn.Sequential(
+            nn.Linear(hidden_dim * 2, hidden_dim),
+            nn.Tanh(),
+            nn.Linear(hidden_dim, 1),
+        )
+        self.fc = nn.Linear(hidden_dim * 2, hidden_dim)
+
+    def forward(self, features, seq_lengths=None):
+        # features: (B, T, input_dim)
+        lstm_out, _ = self.lstm(features)  # (B, T, hidden_dim*2)
+
+        scores = self.attn(lstm_out).squeeze(-1)  # (B, T)
+
+        if seq_lengths is not None:
+            B, T = features.shape[:2]
+            pad_mask = (
+                torch.arange(T, device=features.device).unsqueeze(0) >= seq_lengths.unsqueeze(1)
+            )  # True = padding
+            scores = scores.masked_fill(pad_mask, float("-inf"))
+
+        weights = torch.softmax(scores, dim=1).unsqueeze(-1)  # (B, T, 1)
+        out = (lstm_out * weights).sum(dim=1)  # (B, hidden_dim*2)
+
+        return self.fc(out)  # (B, hidden_dim)
+
+
 class TemporalMeanPool(nn.Module):
-    """Masked mean pooling — baseline đơn giản nhất."""
+    """Masked mean pooling — baseline"""
 
     def forward(self, features, seq_lengths=None):
         if seq_lengths is not None:
@@ -86,13 +131,14 @@ class TemporalMeanPool(nn.Module):
 _TEMPORAL_MODULES = {
     "lstm": TemporalLSTM,
     "transformer": TemporalTransformer,
+    "attn-pool": TemporalAttnPool,
     "mean": TemporalMeanPool,
 }
 
 
 class MA3D_Video(nn.Module):
     """
-    Wrapper quanh MA3D backbone để nhận diện cảm xúc trên video.
+    Wrapper MA3D backbone for video.
 
     Pipeline:
         (B, T, 3, 224, 224)  →  per-frame MA3D features (B, T, 512)
@@ -100,15 +146,15 @@ class MA3D_Video(nn.Module):
                               →  classification head          (B, num_classes)
 
     Args:
-        img_size: kích thước ảnh đầu vào (mặc định 224)
-        num_classes: số lớp cảm xúc (mặc định 7)
-        type: biến thể backbone "small"|"base"|"large"
+        img_size: default 224
+        num_classes: default 7
+        type: "small"|"base"|"large"
         use_3dmm: có dùng nhánh ThreeDMM hay không
-        temporal_module: "lstm" | "transformer" | "mean"
-        hidden_dim: chiều ẩn của temporal module (chỉ áp dụng với lstm)
-        freeze_backbone: đóng băng toàn bộ MA3D trong giai đoạn 1
-        head_dropout: dropout trước classification head (chống overfit)
-        backbone_chunk_size: số frame tối đa mỗi lần forward qua backbone
+        temporal_module: "lstm" | "transformer" | "attn-pool" | "mean"
+        hidden_dim: only for lstm
+        freeze_backbone: đóng băng toàn bộ MA3D 
+        head_dropout: dropout before classification head
+        backbone_chunk_size: max number of frames forward to backbone
     """
 
     def __init__(
@@ -141,6 +187,9 @@ class MA3D_Video(nn.Module):
         if temporal_module == "lstm":
             self.temporal = TemporalLSTM(input_dim=512, hidden_dim=hidden_dim)
             out_dim = hidden_dim
+        elif temporal_module == "attn-pool":
+            self.temporal = TemporalAttnPool(input_dim=512, hidden_dim=hidden_dim)
+            out_dim = hidden_dim
         elif temporal_module == "transformer":
             self.temporal = TemporalTransformer(embed_dim=512)
             out_dim = 512
@@ -165,8 +214,8 @@ class MA3D_Video(nn.Module):
         """
         Args:
             video:      (B, T, 3, H, W)
-            video_3d:   (B, T, 334) per-frame  hoặc  (B, 334) cố định  hoặc  None
-            seq_lengths: (B,) số frame thực của mỗi video (trước khi padding)
+            video_3d:   (B, T, 334) per-frame or (B, 334) or None
+            seq_lengths: (B,) actual number of frames before padding
 
         Returns:
             logits:   (B, num_classes)
@@ -174,23 +223,15 @@ class MA3D_Video(nn.Module):
         """
         B, T = video.shape[:2]
 
-        # Batch tất cả T frames vào một forward pass duy nhất thay vì vòng lặp
         frames_flat = video.view(B * T, *video.shape[2:])  # (B*T, 3, H, W)
 
         x_3d_flat = None
         if self.use_3dmm and video_3d is not None:
             if video_3d.dim() == 3:        # (B, T, 334) — per-frame
                 x_3d_flat = video_3d.reshape(B * T, video_3d.shape[-1])
-            else:                          # (B, 334) — cố định cho cả video
+            else:                          # (B, 334) — fixed for whole video
                 x_3d_flat = video_3d.unsqueeze(1).expand(-1, T, -1).reshape(B * T, -1)
 
-        # Forward backbone theo chunk thay vì đẩy toàn bộ B*T frame một lần.
-        # Khi backbone được unfreeze, activations cho backward của cả B*T frame
-        # vượt VRAM 12GB → Windows WDDM oversubscribe → driver reset (TDR) →
-        # CUDA context chết, biểu hiện là cuDNN CUDNN_STATUS_BAD_PARAM_STREAM_MISMATCH.
-        # Gradient checkpointing đổi ~30% compute lấy việc không phải giữ
-        # activations của từng chunk (BN running stats bị update 2 lần/step —
-        # sai lệch nhỏ, chấp nhận được).
         backbone_trainable = any(p.requires_grad for p in self.backbone.parameters())
         use_ckpt = self.training and backbone_trainable and torch.is_grad_enabled()
 
