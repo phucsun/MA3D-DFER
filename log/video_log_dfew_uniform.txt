@@ -1,0 +1,63 @@
+use_3dmm=True  temporal=transformer  amp=False  patience=5  batch=1  select=mean  cls_w=True(pow=0.5)  sampler=True(pow=0.3)
+checkpoint: checkpoints/video_best_dfew_uniform.pth
+Epoch       LR       Train_Loss  Train_Acc    Val_Loss    Val_WAR    Val_UAR   Time(min)    ES  
+use_3dmm=True  temporal=transformer  amp=False  patience=5  batch=1  select=mean  cls_w=True(pow=0.5)  sampler=True(pow=0.3)
+checkpoint: checkpoints/video_best_dfew_uniform.pth
+Epoch       LR       Train_Loss  Train_Acc    Val_Loss    Val_WAR    Val_UAR   Time(min)    ES  
+use_3dmm=True  temporal=transformer  amp=False  patience=5  batch=1  select=mean  cls_w=True(pow=0.5)  sampler=True(pow=0.3)
+checkpoint: checkpoints/video_best_dfew_uniform.pth
+Epoch       LR       Train_Loss  Train_Acc    Val_Loss    Val_WAR    Val_UAR   Time(min)    ES  
+use_3dmm=True  temporal=transformer  amp=False  patience=5  batch=1  select=mean  cls_w=True(pow=0.5)  sampler=True(pow=0.3)
+checkpoint: checkpoints/video_best_dfew_uniform.pth
+Epoch       LR       Train_Loss  Train_Acc    Val_Loss    Val_WAR    Val_UAR   Time(min)    ES  
+use_3dmm=True  temporal=transformer  amp=False  patience=5  batch=1  select=mean  cls_w=True(pow=0.5)  sampler=True(pow=0.3)
+checkpoint: checkpoints/video_best_dfew_uniform.pth
+Epoch       LR       Train_Loss  Train_Acc    Val_Loss    Val_WAR    Val_UAR   Time(min)    ES  
+use_3dmm=True  temporal=transformer  amp=False  patience=5  batch=1  select=mean  cls_w=True(pow=0.5)  sampler=True(pow=0.3)
+checkpoint: checkpoints/video_best_dfew_uniform.pth
+Epoch       LR       Train_Loss  Train_Acc    Val_Loss    Val_WAR    Val_UAR   Time(min)    ES  
+  1     0.00009939     4.1954      56.69       1.0978      62.32      49.15      48.89      0   
+BEST	mean=55.74	WAR=62.32	UAR=49.15
+use_3dmm=True  temporal=transformer  amp=False  patience=5  batch=1  select=mean  cls_w=True(pow=0.5)  sampler=True(pow=0.3)
+checkpoint: checkpoints/video_best_dfew_uniform.pth
+Epoch       LR       Train_Loss  Train_Acc    Val_Loss    Val_WAR    Val_UAR   Time(min)    ES  
+use_3dmm=True  temporal=transformer  amp=False  patience=5  batch=1  select=mean  cls_w=True(pow=0.5)  sampler=True(pow=0.3)
+checkpoint: checkpoints/video_best_dfew_uniform.pth
+Epoch       LR       Train_Loss  Train_Acc    Val_Loss    Val_WAR    Val_UAR   Time(min)    ES  
+use_3dmm=True  temporal=transformer  amp=False  patience=5  batch=1  select=mean  cls_w=True(pow=0.5)  sampler=True(pow=0.3)
+checkpoint: checkpoints/video_best_dfew_uniform.pth
+Epoch       LR       Train_Loss  Train_Acc    Val_Loss    Val_WAR    Val_UAR   Time(min)    ES  
+use_3dmm=True  temporal=transformer  amp=False  patience=5  batch=1  select=mean  cls_w=True(pow=0.5)  sampler=True(pow=0.3)
+checkpoint: checkpoints/video_best_dfew_uniform.pth
+Epoch       LR       Train_Loss  Train_Acc    Val_Loss    Val_WAR    Val_UAR   Time(min)    ES  
+  1     0.00009939     4.1665      57.02       1.0811      63.05      49.31      39.89      0   
+BEST	mean=56.18	WAR=63.05	UAR=49.31
+  2     0.00009758     3.9661      60.71       1.0676      61.90      50.51      39.10      0   
+BEST	mean=56.21	WAR=61.90	UAR=50.51
+  3     0.00009460     3.8713      62.17       1.0245      65.27      51.41      40.02      0   
+BEST	mean=58.34	WAR=65.27	UAR=51.41
+  4     0.00009055     3.7858      63.65       1.0334      64.80      51.08      38.50      0   
+  5     0.00008550     3.7501      64.25       1.0338      63.48      52.97      38.62      1   
+  6     0.00007960     3.9548      61.78       1.0470      63.56      52.34      143.88     2   
+  7     0.00007297     3.5142      69.16       0.9533      68.22      54.45      141.67     3   
+BEST	mean=61.33	WAR=68.22	UAR=54.45
+  8     0.00006580     3.2018      74.49       0.8695      70.14      56.79      144.77     0   
+BEST	mean=63.46	WAR=70.14	UAR=56.79
+  9     0.00005824     2.9206      80.37       0.9095      68.26      62.26      141.34     0   
+BEST	mean=65.26	WAR=68.26	UAR=62.26
+  10    0.00005050     2.6431      84.56       0.8471      70.57      58.50      141.32     0   
+  11    0.00004276     2.4581      87.82       0.8406      71.51      58.87      140.89     1   
+  12    0.00003520     2.2746      91.18       0.8870      70.40      58.65      141.30     2   
+  13    0.00002803     2.1660      92.97       0.8597      70.91      58.88      141.39     3   
+  14    0.00002140     2.0307      95.16       0.8723      72.15      60.20      141.17     4   
+BEST	mean=66.18	WAR=72.15	UAR=60.20
+  15    0.00001550     1.9619      96.05       0.8883      72.11      60.37      141.18     0   
+BEST	mean=66.24	WAR=72.11	UAR=60.37
+  16    0.00001045     1.9172      96.81       0.8782      72.70      60.49      141.32     0   
+BEST	mean=66.60	WAR=72.70	UAR=60.49
+  17    0.00000640     1.8618      97.64       0.9368      70.74      58.61      141.23     0   
+  18    0.00000342     1.8366      97.99       0.9132      72.66      60.44      141.15     1   
+  19    0.00000161     1.7975      98.53       0.9152      72.32      60.59      140.71     2   
+  20    0.00000100     1.8110      98.40       0.9225      71.85      60.11      140.66     3   
+
+Best checkpoint (mean): WAR=72.70%  UAR=60.49%

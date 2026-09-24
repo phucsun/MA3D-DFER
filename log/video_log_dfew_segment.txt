@@ -1,0 +1,37 @@
+use_3dmm=True  temporal=transformer  amp=False  patience=5  batch=1  select=mean  cls_w=True(pow=0.5)  sampler=True(pow=0.3)
+checkpoint: checkpoints/video_best_dfew_segment.pth
+Epoch       LR       Train_Loss  Train_Acc    Val_Loss    Val_WAR    Val_UAR   Time(min)    ES  
+  1     0.00009939     4.2096      55.88       1.0717      62.84      49.50      49.93      0   
+BEST	mean=56.17	WAR=62.84	UAR=49.50
+use_3dmm=True  temporal=transformer  amp=False  patience=5  batch=1  select=mean  cls_w=True(pow=0.5)  sampler=True(pow=0.3)
+checkpoint: checkpoints/video_best_dfew_segment.pth
+Epoch       LR       Train_Loss  Train_Acc    Val_Loss    Val_WAR    Val_UAR   Time(min)    ES  
+  1     0.00009939     4.2269      56.04       1.1149      60.91      49.25      48.37      0   
+BEST	mean=55.08	WAR=60.91	UAR=49.25
+  2     0.00009758     3.9409      61.51       1.0248      65.01      51.52      48.15      0   
+BEST	mean=58.27	WAR=65.01	UAR=51.52
+  3     0.00009460     3.8913      62.08       1.0516      63.18      49.46      49.29      0   
+  4     0.00009055     3.8095      63.31       1.0072      65.23      51.55      48.31      1   
+BEST	mean=58.39	WAR=65.23	UAR=51.55
+  5     0.00008550     3.7416      64.64       1.0127      64.97      51.61      48.38      0   
+  6     0.00007960     3.9985      61.56       1.0154      66.47      51.99      143.03     1   
+BEST	mean=59.23	WAR=66.47	UAR=51.99
+  7     0.00007297     3.5727      68.19       0.9373      67.54      54.57      142.89     0   
+BEST	mean=61.05	WAR=67.54	UAR=54.57
+  8     0.00006580     3.3082      72.97       0.9242      69.63      56.42      142.45     0   
+BEST	mean=63.02	WAR=69.63	UAR=56.42
+  9     0.00005824     3.0114      78.48       0.8711      69.37      58.93      145.34     0   
+BEST	mean=64.15	WAR=69.37	UAR=58.93
+  10    0.00005050     2.7772      82.79       0.8773      70.31      56.94      141.19     0   
+  11    0.00004276     2.5563      86.32       0.8769      70.35      57.84      145.16     1   
+  12    0.00003520     2.3391      90.10       0.9543      67.75      54.23      144.88     2   
+  13    0.00002803     2.2285      91.59       0.8719      70.95      59.79      142.53     3   
+BEST	mean=65.37	WAR=70.95	UAR=59.79
+  14    0.00002140     2.0925      94.13       0.8974      70.44      59.68      141.45     0   
+  15    0.00001550     1.9998      95.43       0.9100      71.25      57.96      142.12     1   
+  16    0.00001045     1.9227      96.46       0.9311      71.55      58.34      141.33     2   
+  17    0.00000640     1.8450      97.79       0.9439      70.82      57.85      142.44     3   
+  18    0.00000342     1.8439      97.76       0.9282      71.34      59.00      142.54     4   
+EARLY_STOP	epoch=18
+
+Best checkpoint (mean): WAR=70.95%  UAR=59.79%
