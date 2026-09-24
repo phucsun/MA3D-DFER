@@ -1,0 +1,21 @@
+# Monitor VRAM usage while training
+while ($true) { clear; nvidia-smi; sleep 5 }
+
+python.exe video_train.py `
+  --data_dir dataset/CAER/caer_3dmm_half/caer_3dmm_half `
+  --val_split validation `
+  --num_classes 7 `
+  --backbone_checkpoint checkpoints/caers_MA3D.pth `
+  --backbone_lr_scale 0.1 `
+  --temporal_module lstm `
+  --max_frames 16 `
+  --frame_step 2 `
+  --batch_size 32 `
+  --lr 1e-4 `
+  --weight_decay 5e-4 `
+  --epochs 50 `
+  --patience 10 ` `
+  --unfreeze_backbone_epoch 5 ` `
+  --backbone_lr_scale 0.1 ` `
+  --log_file video_log_v2.txt
+  

@@ -69,7 +69,7 @@ class ClassificationHead(nn.Module):
 
 
 class MA3D(nn.Module):
-    def __init__(self, img_size=224, num_classes=7, type="large"):
+    def __init__(self, img_size=224, num_classes=7, type="large", use_3dmm=True):
         super().__init__()
         depth = 8
         if type == "small":
@@ -81,6 +81,7 @@ class MA3D(nn.Module):
 
         self.img_size = img_size
         self.num_classes = num_classes
+        self.use_3dmm = use_3dmm
 
         self.face_landback = MobileFaceNet([112, 112],136)
         face_landback_checkpoint = torch.load(
@@ -112,10 +113,12 @@ class MA3D(nn.Module):
 
         self.se_block = SE_block(input_dim=512)
         self.head = ClassificationHead(input_dim=512, target_dim=self.num_classes)
-        self.mm_fusion = ThreeDMMFusion(feat_nc=512)
+
+        if self.use_3dmm:
+            self.mm_fusion = ThreeDMMFusion(feat_nc=512)
 
 
-    def forward(self, x, x_3d):
+    def forward(self, x, x_3d=None):
         B = x.shape[0]
 
         x_face = F.interpolate(x, size=112)
@@ -126,8 +129,9 @@ class MA3D(nn.Module):
         x_ir = self.ir_layer(x_ir)
         x_ir = x_ir.permute(0, 2, 1).view(B, 512, 7, 7)
 
+        if self.use_3dmm and x_3d is not None:
+            x_ir = self.mm_fusion(x_ir, x_3d)
 
-        x_ir = self.mm_fusion(x_ir, x_3d)
         x_ir = x_ir.view(B, 512, -1).transpose(1, 2)
 
         y_hat, attn_all = self.pyramid_fuse(x_ir, x_face)

@@ -1,0 +1,5 @@
+dataset/
+myenv/
+.git/
+checkpoints/
+graphify-out/

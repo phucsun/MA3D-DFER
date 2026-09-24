@@ -5,3 +5,8 @@ log/
 results/
 __pycache__/
 .idea/
+dataset/
+.claude/
+.gemini/
+graphify-out/
+myenv/
