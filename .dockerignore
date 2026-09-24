@@ -1,0 +1,24 @@
+# Thư mục checkpoint, data, logs, kết quả
+checkpoints/
+Datasets/
+log/
+results/
+
+# Dockerfile folder (nếu không cần copy)
+docker/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Các file model lớn
+*.pt
+*.pth
+*.ckpt
+
+# Git
+.git/
+.gitignore
+
+# File nén không cần thiết
+*.zip
